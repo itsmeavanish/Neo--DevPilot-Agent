@@ -1,0 +1,48 @@
+# =====================================================
+# JARVIS Cloud Deployment Dockerfile
+# Optimized for Railway, Render, Fly.io, etc.
+# =====================================================
+
+FROM python:3.11-slim
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app/src \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create app directory
+WORKDIR /app
+
+# Copy requirements first for better caching
+COPY pyproject.toml ./
+
+# Install Python dependencies
+RUN pip install --upgrade pip && \
+    pip install -e . || pip install fastapi uvicorn pydantic pydantic-settings httpx aiohttp psutil redis
+
+# Copy application code
+COPY src/ ./src/
+COPY run.py ./
+
+# Create non-root user for security
+RUN useradd -m -u 1000 jarvis && \
+    chown -R jarvis:jarvis /app
+USER jarvis
+
+# Expose port (Railway uses $PORT)
+EXPOSE 8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:${PORT:-8000}/ || exit 1
+
+# Start command (Railway injects $PORT)
+CMD ["sh", "-c", "uvicorn jarvis.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
