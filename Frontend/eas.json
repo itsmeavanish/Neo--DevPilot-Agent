@@ -1,6 +1,7 @@
 {
   "cli": {
-    "version": ">= 5.0.0"
+    "version": ">= 5.0.0",
+    "appVersionSource": "local"
   },
   "build": {
     "development": {
@@ -14,18 +15,26 @@
       "distribution": "internal",
       "android": {
         "buildType": "apk"
-      },
-      "ios": {
-        "simulator": true
       }
     },
     "production": {
       "android": {
         "buildType": "apk"
-      },
-      "ios": {
-        "resourceClass": "m-medium"
       }
+    },
+    "apk": {
+      "android": {
+        "buildType": "apk",
+        "gradleCommand": ":app:assembleRelease"
+      },
+      "distribution": "internal"
+    },
+    "local": {
+      "android": {
+        "buildType": "apk"
+      },
+      "distribution": "internal",
+      "developmentClient": false
     }
   },
   "submit": {

@@ -25,6 +25,8 @@ import {
   writeFile,
   runSystemCommand,
   copilotEdit,
+  askAI,
+  getCurrentWorkingDirectory,
   FileInfo,
   CopilotEditResponse,
 } from '@/lib/api';
@@ -82,7 +84,7 @@ export default function IDEScreen() {
   const isTablet = windowWidth >= MOBILE_BREAKPOINT && windowWidth < TABLET_BREAKPOINT;
 
   // State
-  const [currentPath, setCurrentPath] = useState(params.openPath || 'C:\\Users\\7CIN\\Desktop\\Jarvis');
+  const [currentPath, setCurrentPath] = useState(params.openPath || '.');
   const [files, setFiles] = useState<FileInfo[]>([]);
   const [loadingFiles, setLoadingFiles] = useState(false);
   const [openTabs, setOpenTabs] = useState<OpenTab[]>([]);
@@ -97,7 +99,7 @@ export default function IDEScreen() {
 
   // Copilot Chat state
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
-    { id: '1', role: 'assistant', content: 'Hi! I can help you edit code. Tell me what changes to make.' },
+    { id: '1', role: 'assistant', content: 'Hi! I can help you with code questions, explanations, and editing. To edit code, use keywords like "edit", "change", or "fix" with an open file.' },
   ]);
   const [chatInput, setChatInput] = useState('');
   const [loadingChat, setLoadingChat] = useState(false);
@@ -115,6 +117,27 @@ export default function IDEScreen() {
 
   const terminalScrollRef = useRef<ScrollView>(null);
   const chatScrollRef = useRef<ScrollView>(null);
+
+  // Initialize current path dynamically
+  useEffect(() => {
+    const initializePath = async () => {
+      if (!params.openPath) {
+        try {
+          const workingDir = await getCurrentWorkingDirectory();
+          setCurrentPath(workingDir);
+          setFolderInput(workingDir);
+          loadDirectory(workingDir);
+        } catch (error) {
+          console.warn('Failed to get working directory, using fallback');
+          loadDirectory('.');
+        }
+      } else {
+        loadDirectory(params.openPath);
+      }
+    };
+
+    initializePath();
+  }, []);
 
   // Toggle sidebar with animation
   const toggleSidebar = useCallback(() => {
@@ -156,12 +179,9 @@ export default function IDEScreen() {
   }, [showHidden]);
 
   useEffect(() => {
-    loadDirectory(currentPath);
-  }, []);
-
-  useEffect(() => {
     if (params.openPath) {
       setCurrentPath(params.openPath);
+      setFolderInput(params.openPath);
       loadDirectory(params.openPath);
     }
   }, [params.openPath]);
@@ -275,10 +295,6 @@ export default function IDEScreen() {
   // Send Copilot message
   const sendCopilotMessage = async () => {
     if (!chatInput.trim() || loadingChat) return;
-    if (!activeTab) {
-      Alert.alert('No File Open', 'Open a file first to edit it with Copilot.');
-      return;
-    }
 
     const userMsg: ChatMessage = {
       id: Date.now().toString(),
@@ -286,33 +302,63 @@ export default function IDEScreen() {
       content: chatInput,
     };
     setChatMessages(prev => [...prev, userMsg]);
+    const currentInput = chatInput;
     setChatInput('');
     setLoadingChat(true);
 
     try {
-      const result = await copilotEdit(activeTab, chatInput, false);
+      // Determine if this is a code edit request or general chat
+      const isEditRequest = /\b(edit|change|modify|update|fix|refactor|rewrite)\b/i.test(currentInput) && activeTab;
 
-      const assistantMsg: ChatMessage = {
-        id: (Date.now() + 1).toString(),
-        role: 'assistant',
-        content: result.success
-          ? 'Here are my suggested changes. Tap "Apply" to update the file.'
-          : result.message,
-        isError: !result.success,
-        diff: result.success ? result.diff : undefined,
-        filePath: activeTab,
-      };
+      if (isEditRequest && activeTab) {
+        // Use Copilot editing for code modifications
+        const result = await copilotEdit(activeTab, currentInput, false);
 
-      setChatMessages(prev => [...prev, assistantMsg]);
+        const assistantMsg: ChatMessage = {
+          id: (Date.now() + 1).toString(),
+          role: 'assistant',
+          content: result.success
+            ? 'Here are my suggested changes. You can apply them if they look good.'
+            : result.message,
+          isError: !result.success,
+          diff: result.success ? result.diff : undefined,
+          filePath: activeTab,
+        };
 
-      if (result.success) {
-        setPendingEdit(result);
+        setChatMessages(prev => [...prev, assistantMsg]);
+
+        // If successful, show the pending edit
+        if (result.success) {
+          setPendingEdit(result);
+        }
+      } else {
+        // Use general AI chat for questions, explanations, etc.
+        const fileContent = activeTab ? (await readFile(activeTab)).content : undefined;
+        const fileLanguage = activeTab ? activeTab.split('.').pop() : undefined;
+
+        const aiResponse = await askAI(
+          currentInput,
+          fileContent,
+          activeTab,
+          fileLanguage
+        );
+
+        const assistantMsg: ChatMessage = {
+          id: (Date.now() + 1).toString(),
+          role: 'assistant',
+          content: aiResponse.status === 'success'
+            ? aiResponse.response
+            : aiResponse.error || 'AI is not available. Check your AI provider settings.',
+          isError: aiResponse.status !== 'success',
+        };
+
+        setChatMessages(prev => [...prev, assistantMsg]);
       }
     } catch (err) {
       setChatMessages(prev => [...prev, {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
-        content: `Error: ${err instanceof Error ? err.message : 'Unknown error'}`,
+        content: `Error: ${err instanceof Error ? err.message : 'Failed to get AI response. Check your connection and AI provider settings.'}`,
         isError: true,
       }]);
     } finally {
@@ -338,9 +384,15 @@ export default function IDEScreen() {
     setPendingEdit(null);
   };
 
+  // Helper function to get path separator
+  const getPathSeparator = (path: string) => {
+    return path.includes('\\') ? '\\' : '/';
+  };
+
   // Go to parent
   const goUp = () => {
-    const parent = currentPath.substring(0, currentPath.lastIndexOf('\\'));
+    const separator = getPathSeparator(currentPath);
+    const parent = currentPath.substring(0, currentPath.lastIndexOf(separator));
     if (parent && parent !== currentPath) {
       loadDirectory(parent);
     }
@@ -460,7 +512,7 @@ export default function IDEScreen() {
         <TouchableOpacity style={styles.folderHeader} onPress={goUp}>
           <Ionicons name="chevron-up" size={14} color={VSColors.textMuted} />
           <Text style={styles.folderName} numberOfLines={1}>
-            {currentPath.split('\\').pop() || 'Root'}
+            {currentPath.split(/[/\\]/).pop() || 'Root'}
           </Text>
         </TouchableOpacity>
 
@@ -628,7 +680,7 @@ export default function IDEScreen() {
               style={[styles.chatInput, isMobile && styles.chatInputMobile]}
               value={chatInput}
               onChangeText={setChatInput}
-              placeholder={activeTab ? "Ask Copilot to edit..." : "Open a file first..."}
+              placeholder={activeTab ? "Ask questions or request code edits..." : "Ask AI questions (open a file to edit code)..."}
               placeholderTextColor={VSColors.textMuted}
               multiline
               maxLength={500}

@@ -9,6 +9,7 @@ from fastapi import APIRouter
 from jarvis.api.v1 import (
     agent, tools, system, memory, self_heal,
     devices, workflows, ide, observability,
+    agent_ws, pairing,
 )
 
 router = APIRouter(prefix="/api/v1")
@@ -23,5 +24,9 @@ router.include_router(devices.router, prefix="/devices", tags=["Devices"])
 router.include_router(workflows.router, prefix="/workflows", tags=["Workflows"])
 router.include_router(ide.router, prefix="/ide", tags=["IDE"])
 router.include_router(observability.router, prefix="/observability", tags=["Observability"])
+
+# New routers for remote agents and phone pairing
+router.include_router(agent_ws.router)
+router.include_router(pairing.router, prefix="/pairing", tags=["Pairing"])
 
 __all__ = ["router"]

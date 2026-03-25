@@ -1,0 +1,119 @@
+==============================================================
+             JARVIS - Complete Setup Guide
+==============================================================
+
+JARVIS lets you control your laptop from your phone using AI.
+
+==============================================================
+                      ARCHITECTURE
+==============================================================
+
+  [Your Phone]  <--(Internet)-->  [JARVIS Server]  <--(WebSocket)-->  [Laptop Agent]
+      (APK)                         (ngrok)                            (Python)
+
+Server URL: https://precommercial-nubbly-theda.ngrok-free.dev
+
+==============================================================
+                    QUICK START
+==============================================================
+
+1. START THE SERVER (Your Main Laptop)
+   ---------------------------------
+   cd Jarvis
+   python run.py
+
+   Then in another terminal:
+   ngrok http 8000
+
+2. GIVE THE APK TO USERS
+   ----------------------
+   Build: cd Frontend && build-apk.bat
+   Or use: npx eas build -p android --profile production
+
+   Download APK from Expo dashboard and share with users.
+
+3. INSTALL AGENT (Other Laptops)
+   ------------------------------
+   Give users the "agent-installer" folder.
+   They run install.bat and start the agent.
+   Their laptop appears in the app automatically!
+
+==============================================================
+               FOR SERVER ADMIN (You)
+==============================================================
+
+STARTING THE SERVER:
+   # Terminal 1: Run JARVIS
+   cd c:\Users\7CIN\Desktop\Jarvis
+   python run.py
+
+   # Terminal 2: Start ngrok tunnel
+   ngrok http 8000
+
+Keep both terminals running. Your ngrok URL is:
+   https://precommercial-nubbly-theda.ngrok-free.dev
+
+==============================================================
+               FOR APK USERS (Others)
+==============================================================
+
+1. Install the JARVIS APK on your Android phone
+2. Open the app
+3. It will automatically connect to the server
+4. Start chatting to control connected laptops!
+
+==============================================================
+           FOR LAPTOP AGENTS (Other Laptops)
+==============================================================
+
+To let someone control their laptop via JARVIS:
+
+1. Give them the "agent-installer" folder (zip it up)
+2. They extract and run "install.bat"
+3. They double-click "JARVIS Agent" on their desktop
+4. Their laptop will appear in the mobile app!
+
+REQUIREMENTS:
+   - Windows 10/11
+   - Python 3.8+ (https://python.org)
+   - Internet connection
+
+==============================================================
+                   TESTING LOCALLY
+==============================================================
+
+1. Start server: python run.py
+2. Start ngrok: ngrok http 8000
+3. Start agent: cd agent-installer && python jarvis_agent.py
+4. Use phone app or test via:
+   curl https://precommercial-nubbly-theda.ngrok-free.dev/health
+
+==============================================================
+                   TROUBLESHOOTING
+==============================================================
+
+Q: App can't connect?
+A: Make sure ngrok is running and URL is correct.
+
+Q: Agent not showing in app?
+A: Check if agent window shows "Connected!"
+
+Q: Commands not working?
+A: Check server logs for errors.
+
+==============================================================
+                    FILE STRUCTURE
+==============================================================
+
+Jarvis/
+├── run.py              # Main server entry point
+├── agent-installer/    # For distributing to laptop users
+│   ├── install.bat     # One-click installer
+│   ├── jarvis_agent.py # The agent script
+│   └── README.txt      # User instructions
+├── Frontend/           # Mobile app source
+│   ├── build-apk.bat   # Build APK script
+│   └── app.json        # App configuration
+└── src/jarvis/         # Server code
+
+==============================================================
