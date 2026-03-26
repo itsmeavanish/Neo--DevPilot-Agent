@@ -29,4 +29,4 @@ Control your laptop from your phone with AI assistance.
 | **Git**          | Status, commit, push, pull       |
 | **Multi-Laptop** | Switch between devices           |
 
-## Project Structure
+## Project Structurecobtinue 

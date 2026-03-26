@@ -1,10 +1,10 @@
 {
   "expo": {
-    "name": "JARVIS",
+    "name": "Neo Jarvis",
     "slug": "jarvis-devpilot",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
+    "icon": "./assets/neo.png",
     "scheme": "jarvis",
     "userInterfaceStyle": "dark",
     "newArchEnabled": true,
@@ -34,10 +34,18 @@
     },
     "plugins": [
       "expo-router",
-      "expo-secure-store"
+      "expo-secure-store",
+      "expo-font"
     ],
     "extra": {
-      "serverUrl": "https://precommercial-nubbly-theda.ngrok-free.dev"
-    }
+      "serverUrl": "https://precommercial-nubbly-theda.ngrok-free.dev",
+      "router": {
+        "origin": false
+      },
+      "eas": {
+        "projectId": "b51a1c71-98d2-432d-ad41-91b94c29b635"
+      }
+    },
+    "owner": "avanish633"
   }
 }

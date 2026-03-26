@@ -12,15 +12,14 @@ import {
   RefreshControl,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { Colors } from '@/lib/theme';
-import {
+import { Colors } from '../lib/theme';
   listDirectory,
   readFile,
   getProjectInfo,
   FileInfo,
   FileContent,
   ProjectInfo,
-} from '@/lib/api';
+} from '../lib/api';
 
 export default function FilesScreen() {
   const [currentPath, setCurrentPath] = useState('');

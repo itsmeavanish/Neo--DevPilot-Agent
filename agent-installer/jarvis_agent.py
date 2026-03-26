@@ -49,7 +49,7 @@ class JarvisAgent:
         ts = datetime.now().strftime("%H:%M:%S")
         print(f"[{ts}] [{level}] {msg}")
     async def connect(self):
-        self.log(f"Connecting to JARVIS server...")
+        self.log(f"Connecting to JARVIS server at {self.ws_url} ...")
         try:
             # Add connection timeout to prevent hanging
             self.ws = await asyncio.wait_for(
@@ -75,10 +75,10 @@ class JarvisAgent:
                 self.log(f"Registration failed: {data}", "ERROR")
                 return False
         except asyncio.TimeoutError:
-            self.log("Connection timeout - JARVIS server may not be running", "ERROR")
+            self.log(f"Connection timeout - JARVIS server may not be running at {self.ws_url}", "ERROR")
             return False
         except Exception as e:
-            self.log(f"Connection failed: {e}", "ERROR")
+            self.log(f"Connection failed to {self.ws_url}: {e}", "ERROR")
             return False
     async def send_status(self):
         status = {

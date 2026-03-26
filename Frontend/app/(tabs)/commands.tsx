@@ -11,8 +11,8 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { Colors, Spacing, FontSize, BorderRadius } from '@/lib/theme';
-import { runSystemCommand } from '@/lib/api';
+import { Colors, Spacing, FontSize, BorderRadius } from '../../lib/theme';
+import { runSystemCommand } from '../../lib/api';
 
 interface TerminalLine {
   id: string;

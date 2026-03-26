@@ -43,6 +43,7 @@ if not exist "%USERPROFILE%\.jarvis" mkdir "%USERPROFILE%\.jarvis"
 :: Copy agent script
 copy /Y "%~dp0jarvis_agent.py" "%USERPROFILE%\.jarvis\jarvis_agent.py" >nul
 
+
 :: Create config file
 echo Creating configuration...
 (

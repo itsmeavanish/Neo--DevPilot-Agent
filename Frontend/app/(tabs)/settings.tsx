@@ -11,8 +11,8 @@ import {
   Modal,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { Colors } from '@/lib/theme';
-import configManager from '@/lib/config';
+import { Colors } from '../lib/theme';
+import configManager from '../lib/config';
 import {
   getPairedLaptopStatus,
   checkHealth,
@@ -297,10 +297,15 @@ export default function SettingsScreen() {
             <View style={styles.cardInfo}>
               <Text style={styles.cardTitle}>JARVIS Server</Text>
               <Text style={styles.cardSubtitle} numberOfLines={1}>{configManager.backendUrl}</Text>
+              {configManager.isBackendUrlUnsafe && (
+                <Text style={{ color: 'red', marginTop: 8 }}>
+                  Warning: Backend URL is set to localhost or 127.0.0.1. This will not work in production APK. Please use your ngrok or public URL.
+                </Text>
+              )}
             </View>
             <View style={styles.statusBadge}>
               <View style={[styles.statusDot, { backgroundColor: serverOnline ? Colors.green : Colors.red }]} />
-              <Text style={[styles.statusText, { color: serverOnline ? Colors.green : Colors.red }]}>
+              <Text style={[styles.statusText, { color: serverOnline ? Colors.green : Colors.red }]}> 
                 {serverOnline ? 'Online' : 'Offline'}
               </Text>
             </View>

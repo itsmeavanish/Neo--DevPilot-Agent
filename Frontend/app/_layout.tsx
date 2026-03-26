@@ -11,9 +11,9 @@ import {
   Alert,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { Colors } from '@/lib/theme';
-import configManager from '@/lib/config';
-import { checkPairingCode, getPairedLaptopStatus, LaptopStatus } from '@/lib/api';
+import { Colors } from '../lib/theme';
+import configManager from '../lib/config';
+import { checkPairingCode, getPairedLaptopStatus, LaptopStatus } from '../lib/api';
 
 function PairingScreen({ onPaired }: { onPaired: () => void }) {
   const [code, setCode] = useState('');

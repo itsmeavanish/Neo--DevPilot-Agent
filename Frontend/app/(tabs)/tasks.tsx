@@ -9,8 +9,8 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { Colors, Spacing, FontSize, BorderRadius } from '@/lib/theme';
-import { runSystemCommand, runGitCommand, type CommandResponse } from '@/lib/api';
+import { Colors, Spacing, FontSize, BorderRadius } from '../lib/theme';
+import { runSystemCommand, runGitCommand, type CommandResponse } from '../lib/api';
 
 interface Task {
   id: string;
