@@ -11,8 +11,8 @@ import {
   Modal,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { Colors } from '../lib/theme';
-import configManager from '../lib/config';
+import { Colors } from '../../lib/theme';
+import configManager from '../../lib/config';
 import {
   getPairedLaptopStatus,
   checkHealth,
@@ -642,7 +642,7 @@ export default function SettingsScreen() {
               <Text style={styles.inputLabel}>Current Model: {copilotModels?.current || 'Loading...'}</Text>
             </View>
 
-            {copilotModels?.models && Object.entries(copilotModels.models).map(([category, models]) => (
+            {copilotModels?.models && Object.entries(copilotModels.models as Record<string, string[]>).map(([category, models]) => (
               <View key={category} style={{marginBottom: 16}}>
                 <Text style={[styles.inputLabel, {marginBottom: 8}]}>{category}</Text>
                 {models.map((model: string) => (

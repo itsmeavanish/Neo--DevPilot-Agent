@@ -4,7 +4,7 @@
     "slug": "jarvis-devpilot",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/neo.png",
+    "icon": "./assets/icon.png",
     "scheme": "jarvis",
     "userInterfaceStyle": "dark",
     "newArchEnabled": true,
@@ -30,7 +30,7 @@
     "web": {
       "bundler": "metro",
       "output": "static",
-      "favicon": "./assets/favicon.png"
+      "favicon": "./assets/icon.png"
     },
     "plugins": [
       "expo-router",

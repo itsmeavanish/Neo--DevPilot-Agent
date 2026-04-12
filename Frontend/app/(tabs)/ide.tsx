@@ -339,7 +339,7 @@ export default function IDEScreen() {
         const aiResponse = await askAI(
           currentInput,
           fileContent,
-          activeTab,
+          activeTab ?? undefined,
           fileLanguage
         );
 

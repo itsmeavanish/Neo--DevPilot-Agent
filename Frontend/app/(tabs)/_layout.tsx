@@ -2,8 +2,8 @@ import { Tabs } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { View, Text, StyleSheet } from 'react-native';
 import { useState, useEffect } from 'react';
-import { checkHealth } from '../lib/api';
-import  { Colors } from '../lib/theme';
+import { checkHealth } from '../../lib/api';
+import  { Colors } from '../../lib/theme';
 function TabBarIcon({ name, color, size }: { name: keyof typeof Ionicons.glyphMap; color: string; size: number }) {
   return <Ionicons name={name} size={size} color={color} />;
 }

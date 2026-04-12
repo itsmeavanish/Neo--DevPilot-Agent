@@ -11,9 +11,9 @@ import {
   TextInput,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { Colors } from '../lib/theme';
-import configManager from '../lib/config';
-import { getPairedLaptopStatus, executeCommand, LaptopStatus } from '../lib/api';
+import { Colors } from '../../lib/theme';
+import configManager from '../../lib/config';
+import { getPairedLaptopStatus, executeCommand, LaptopStatus } from '../../lib/api';
 
 export default function DevicesScreen() {
   const [laptop, setLaptop] = useState<LaptopStatus | null>(null);

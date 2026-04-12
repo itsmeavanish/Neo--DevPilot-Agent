@@ -14,8 +14,8 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
 import { useRouter } from 'expo-router';
-import { Colors, Spacing, FontSize, BorderRadius } from '../lib/theme';
-import { runSystemCommand, runGitCommand, openVSCode, openProject, runCopilot, askAI, readFile, getAIProviders } from '../lib/api';
+import { Colors, Spacing, FontSize, BorderRadius } from '../../lib/theme';
+import { runSystemCommand, runGitCommand, openVSCode, openProject, runCopilot, askAI, readFile, getAIProviders } from '../../lib/api';
 
 interface Message {
   id: string;

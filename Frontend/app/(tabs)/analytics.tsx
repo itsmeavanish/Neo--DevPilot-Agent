@@ -8,8 +8,8 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { Colors, Spacing, FontSize, BorderRadius } from '../lib/theme';
-import { getSystemInfo, checkHealth, type SystemInfo } from '../lib/api';
+import { Colors, Spacing, FontSize, BorderRadius } from '../../lib/theme';
+import { getSystemInfo, checkHealth, type SystemInfo } from '../../lib/api';
 
 function StatCard({
   icon,
