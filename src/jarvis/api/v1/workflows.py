@@ -422,4 +422,114 @@ async def get_templates():
     }
 
 
+
+# ═══════════════════════════════════════════════════════════════
+# AI Workflow Generation
+# ═══════════════════════════════════════════════════════════════
+
+_WORKFLOW_SYSTEM = """You are an expert at creating JARVIS automation workflows.
+Given a plain-English description, generate a complete workflow definition as a JSON object.
+
+The JSON schema is:
+{
+  "name": "<short name>",
+  "description": "<brief description>",
+  "version": "1.0",
+  "triggers": [   // optional
+    {
+      "type": "manual|schedule|file_watch|webhook",
+      // for schedule: "cron": "*/5 * * * *"
+      // for file_watch: "path": "./src", "patterns": ["*.py"]
+    }
+  ],
+  "variables": { "key": "default_value" },  // optional
+  "steps": [
+    {
+      "id": "<unique_id>",
+      "name": "<step name>",
+      "type": "tool",
+      "tool": "shell_execute",
+      "params": { "command": "..." },
+      "depends_on": [],   // optional list of step ids
+      "on_error": "stop|continue|retry"
+    }
+  ]
+}
+
+Available tools: shell_execute, git, file_read, file_write, system_info, docker_ps, docker_build, log_tail.
+
+Return ONLY valid JSON with no extra text or markdown fences."""
+
+
+class WorkflowGenerateRequest(BaseModel):
+    description: str = Field(
+        ...,
+        description="Natural-language description of the workflow you want to create",
+        examples=["Run pytest, then build a Docker image, then deploy to staging"],
+    )
+    create: bool = Field(
+        default=False,
+        description="If true, automatically register the generated workflow",
+    )
+
+
+class WorkflowGenerateResponse(BaseModel):
+    definition: dict
+    workflow_id: str | None = None
+    message: str
+
+
+@router.post("/generate", response_model=WorkflowGenerateResponse)
+async def generate_workflow(request: WorkflowGenerateRequest):
+    """
+    Describe a workflow in plain English and let the AI generate it.
+
+    Set ``create=true`` to immediately register the generated workflow.
+    """
+    from jarvis.api.v1.chat import _get_llm_client
+    import json, re
+
+    llm = await _get_llm_client()
+    if llm is None:
+        raise HTTPException(
+            status_code=503,
+            detail="No LLM provider available. Configure Ollama or set JARVIS_OPENAI_API_KEY.",
+        )
+
+    try:
+        raw = await llm.chat(
+            messages=[{"role": "user", "content": request.description}],
+            system=_WORKFLOW_SYSTEM,
+        )
+
+        # Extract JSON
+        json_match = re.search(r"\{[\s\S]*\}", raw)
+        if not json_match:
+            raise HTTPException(status_code=500, detail=f"LLM did not return valid JSON: {raw[:200]}")
+
+        definition = json.loads(json_match.group())
+
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=500, detail=f"Could not parse generated workflow: {exc}")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    workflow_id = None
+    if request.create:
+        try:
+            engine = get_engine()
+            workflow = engine.create(definition)
+            workflow_id = workflow.id
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Generated workflow is invalid: {exc}")
+
+    return WorkflowGenerateResponse(
+        definition=definition,
+        workflow_id=workflow_id,
+        message="Workflow generated" + (" and registered" if workflow_id else ""),
+    )
+
+
 __all__ = ["router"]

@@ -197,8 +197,21 @@ class AgentLoop:
             # ═══════════════════════════════════════════════
             await self._run_health_check(exec_context)
 
-            # TODO (Phase 2): Retrieve relevant memories
-            # memories = await self.memory.query(intent, types=["context", "pattern"])
+            # Phase 2: Retrieve relevant memories
+            try:
+                from jarvis.memory.service import get_memory_service
+                memory_service = get_memory_service()
+                memories = await memory_service.find_patterns(intent, limit=5)
+                if memories:
+                    memory_context = "\n".join(
+                        f"- {m.item.content}" for m in memories[:3]
+                    )
+                    exec_context["relevant_patterns"] = memory_context
+                    self.logger.debug(
+                        f"Task {task_id}: Injected {len(memories)} memory patterns"
+                    )
+            except Exception as mem_err:
+                self.logger.debug(f"Memory retrieval skipped: {mem_err}")
 
             # ═══════════════════════════════════════════════
             # PHASE 2: DECIDE - Create Plan
@@ -283,7 +296,22 @@ class AgentLoop:
                     step_results=step_results,
                 )
 
-            # TODO (Phase 2): Store successful pattern in memory
+            # Phase 2: Store successful pattern in memory
+            try:
+                from jarvis.memory.service import get_memory_service
+                memory_service = get_memory_service()
+                steps_data = [
+                    {"tool": r.tool_name, "output_preview": str(r.output)[:100]}
+                    for r in step_results
+                ]
+                await memory_service.remember_pattern(
+                    description=intent,
+                    steps=steps_data,
+                    project_id=exec_context.get("project_id"),
+                )
+                self.logger.debug(f"Task {task_id}: Stored execution pattern in memory")
+            except Exception as mem_err:
+                self.logger.debug(f"Memory storage skipped: {mem_err}")
 
             return ExecutionResult.success(
                 plan=plan,
