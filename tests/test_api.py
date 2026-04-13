@@ -93,3 +93,58 @@ class TestAPIEndpoints:
         assert response.status_code == 200
         # Should be text/plain content
         assert "text" in response.headers.get("content-type", "")
+
+
+class TestChatEndpoint:
+    """Tests for the conversational chat and code-review endpoints."""
+
+    @pytest.fixture
+    def client(self):
+        from jarvis.main import app
+        return TestClient(app)
+
+    def test_chat_no_llm_returns_error_message(self, client):
+        """Chat endpoint returns a 200 with an error field when no LLM is configured."""
+        response = client.post(
+            "/api/v1/agent/chat",
+            json={"message": "Hello JARVIS", "history": []},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "session_id" in data
+        # Without a real LLM configured the endpoint still returns a session_id
+        assert isinstance(data["session_id"], str)
+
+    def test_chat_assigns_session_id(self, client):
+        """Each chat call returns a stable session_id."""
+        r1 = client.post("/api/v1/agent/chat", json={"message": "hi", "history": []})
+        assert r1.status_code == 200
+        sid = r1.json()["session_id"]
+
+        # Use the same session_id for the next turn
+        r2 = client.post(
+            "/api/v1/agent/chat",
+            json={"message": "hello again", "history": [], "session_id": sid},
+        )
+        assert r2.status_code == 200
+        assert r2.json()["session_id"] == sid
+
+    def test_review_no_llm_returns_error(self, client):
+        """Code review returns a 200 response even when LLM is unavailable."""
+        response = client.post(
+            "/api/v1/agent/review",
+            json={"code": "def foo(): pass", "language": "python"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "summary" in data
+        assert "issues" in data
+        assert "score" in data
+
+    def test_workflow_generate_no_llm_returns_503(self, client):
+        """Workflow generation returns 503 when no LLM is available."""
+        response = client.post(
+            "/api/v1/workflows/generate",
+            json={"description": "run tests then deploy"},
+        )
+        assert response.status_code == 503

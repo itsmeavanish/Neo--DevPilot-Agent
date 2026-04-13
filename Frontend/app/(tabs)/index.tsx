@@ -15,7 +15,19 @@ import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
 import { useRouter } from 'expo-router';
 import { Colors, Spacing, FontSize, BorderRadius } from '@/lib/theme';
-import { runSystemCommand, runGitCommand, openVSCode, openProject, runCopilot, askAI, readFile, getAIProviders } from '@/lib/api';
+import {
+  runSystemCommand,
+  runGitCommand,
+  openVSCode,
+  openProject,
+  runCopilot,
+  askAI,
+  readFile,
+  getAIProviders,
+  chatWithAgent,
+  reviewCode,
+  type ChatMessage as APIChatMessage,
+} from '@/lib/api';
 
 interface Message {
   id: string;
@@ -36,6 +48,7 @@ const QUICK_ACTIONS = [
   { icon: 'git-branch', label: 'Git', prefix: 'git ' },
   { icon: 'code-slash', label: 'VS Code', prefix: '/vscode' },
   { icon: 'sparkles', label: 'AI', prefix: '/ai ' },
+  { icon: 'checkmark-circle', label: 'Review', prefix: '/review' },
 ];
 
 export default function ChatScreen() {
@@ -44,7 +57,16 @@ export default function ChatScreen() {
     {
       id: '1',
       role: 'assistant',
-      content: "Hello! I'm JARVIS — your DevPilot automation assistant.\n\n• !command — run shell commands\n• git ... — run git commands\n• /vscode [path] — launch VS Code & open IDE\n• /ai prompt — ask AI assistant\n• /file path — load file as context\n\nWhat would you like to do?",
+      content:
+        "Hello! I'm JARVIS — your DevPilot automation assistant.\n\n" +
+        '• !command — run shell commands\n' +
+        '• git ... — run git commands\n' +
+        '• /vscode [path] — launch VS Code & open IDE\n' +
+        '• /ai prompt — ask AI assistant (single-shot)\n' +
+        '• /chat message — full conversational AI with memory\n' +
+        '• /review — AI code-review of the loaded file\n' +
+        '• /file path — load file as context\n\n' +
+        'What would you like to do?',
       timestamp: new Date(),
     },
   ]);
@@ -53,6 +75,8 @@ export default function ChatScreen() {
   const [fileContext, setFileContext] = useState<FileContext | null>(null);
   const [showContextModal, setShowContextModal] = useState(false);
   const [currentProvider, setCurrentProvider] = useState<string>('');
+  // Conversational session state
+  const [sessionId, setSessionId] = useState<string | undefined>(undefined);
   const scrollViewRef = useRef<ScrollView>(null);
 
   useEffect(() => {
@@ -181,6 +205,42 @@ export default function ChatScreen() {
           } else {
             const providerLabel = currentProvider ? `[${currentProvider}] ` : '';
             addMessage('assistant', `${providerLabel}${res.response}`);
+          }
+        }
+      } else if (lowerText.startsWith('/chat ') || lowerText.startsWith('chat ')) {
+        // Full conversational AI with server-side history
+        const prefixLen = lowerText.startsWith('/chat ') ? 6 : 5;
+        const prompt = text.slice(prefixLen).trim();
+        if (!prompt) {
+          addMessage('assistant', 'Please provide a message after /chat', true);
+        } else {
+          const res = await chatWithAgent(prompt, [], sessionId);
+          if (res.error) {
+            addMessage('assistant', `JARVIS Error: ${res.error}`, true);
+          } else {
+            if (!sessionId) setSessionId(res.session_id);
+            addMessage('assistant', res.response);
+          }
+        }
+      } else if (lowerText === '/review' || lowerText === '/review ') {
+        // AI code review of the loaded file
+        if (!fileContext) {
+          addMessage('assistant', 'No file loaded. Use /file <path> first.', true);
+        } else {
+          const res = await reviewCode(fileContext.content, fileContext.language, fileContext.path);
+          if (res.error) {
+            addMessage('assistant', `Review Error: ${res.error}`, true);
+          } else {
+            const issueLines = res.issues.map(
+              (i) => `  [${i.severity.toUpperCase()}]${i.line ? ` L${i.line}` : ''} ${i.message}${i.suggestion ? `\n    → ${i.suggestion}` : ''}`
+            );
+            const report = [
+              `📋 Code Review — Score: ${res.score}/100`,
+              `Summary: ${res.summary}`,
+              '',
+              res.issues.length > 0 ? `Issues (${res.issues.length}):\n${issueLines.join('\n')}` : '✅ No issues found',
+            ].join('\n');
+            addMessage('assistant', report);
           }
         }
       } else if (lowerText.startsWith('/copilot ') || lowerText.startsWith('copilot ')) {

@@ -7,7 +7,7 @@ Main router aggregating all v1 endpoints.
 from fastapi import APIRouter
 
 from jarvis.api.v1 import (
-    agent, tools, system, memory, self_heal,
+    agent, chat, tools, system, memory, self_heal,
     devices, workflows, ide, observability,
 )
 
@@ -15,6 +15,7 @@ router = APIRouter(prefix="/api/v1")
 
 # Include sub-routers
 router.include_router(agent.router, prefix="/agent", tags=["Agent"])
+router.include_router(chat.router, prefix="/agent", tags=["Chat"])
 router.include_router(tools.router, prefix="/tools", tags=["Tools"])
 router.include_router(system.router, prefix="/system", tags=["System"])
 router.include_router(memory.router, prefix="/memory", tags=["Memory"])

@@ -371,4 +371,26 @@ async def show_message(
     return {"shown": True}
 
 
+# ═══════════════════════════════════════════════════════════════
+# Adapters Endpoint
+# ═══════════════════════════════════════════════════════════════
+
+@router.get("/adapters")
+async def list_ide_adapters():
+    """
+    List all available IDE adapters (VS Code, Cursor, etc.)
+    """
+    manager = get_manager()
+    available = manager.list_available()
+    active = manager.active_adapter
+
+    return [
+        {
+            "type": ide.value,
+            "active": active is not None and active.ide_type == ide,
+        }
+        for ide in available
+    ]
+
+
 __all__ = ["router"]
