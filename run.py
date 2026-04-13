@@ -117,7 +117,8 @@ def main():
     
     reload = "--dev" in args or "--reload" in args
     host = os.environ.get("JARVIS_API_HOST", "0.0.0.0")
-    port = int(os.environ.get("JARVIS_API_PORT", "8000"))
+    # Respect $PORT (used by Railway/Render/Fly.io) with JARVIS_API_PORT as fallback
+    port = int(os.environ.get("PORT", os.environ.get("JARVIS_API_PORT", "8000")))
     
     print(f"""
     ╔═══════════════════════════════════════════════════════════╗
