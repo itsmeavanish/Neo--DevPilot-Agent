@@ -9,6 +9,7 @@ from jarvis.tools.builtin.docker import DockerTool
 from jarvis.tools.builtin.process import ProcessTool
 from jarvis.tools.builtin.log import LogReaderTool
 from jarvis.tools.builtin.system import SystemInfoTool
+from jarvis.tools.builtin.ai_tools import CodeReviewTool, GenerateCodeTool, ExplainCommandTool
 
 __all__ = [
     "RunCommandTool",
@@ -21,4 +22,7 @@ __all__ = [
     "ProcessTool",
     "LogReaderTool",
     "SystemInfoTool",
+    "CodeReviewTool",
+    "GenerateCodeTool",
+    "ExplainCommandTool",
 ]
