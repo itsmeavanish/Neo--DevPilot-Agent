@@ -83,6 +83,9 @@ api_keys.json
 # Node modules (Frontend)
 node_modules/
 
+# Frontend lib (source, must be tracked)
+!Frontend/lib/
+
 # EAS Build
 .expo/
 build/
