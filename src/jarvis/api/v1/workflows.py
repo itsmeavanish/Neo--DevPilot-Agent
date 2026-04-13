@@ -487,7 +487,8 @@ async def generate_workflow(request: WorkflowGenerateRequest):
     Set ``create=true`` to immediately register the generated workflow.
     """
     from jarvis.api.v1.chat import _get_llm_client
-    import json, re
+    import json
+    import re
 
     llm = await _get_llm_client()
     if llm is None:

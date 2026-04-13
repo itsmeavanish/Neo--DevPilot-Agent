@@ -147,5 +147,4 @@ class TestChatEndpoint:
             "/api/v1/workflows/generate",
             json={"description": "run tests then deploy"},
         )
-        # 503 when no LLM configured
-        assert response.status_code in (200, 503)
+        assert response.status_code == 503

@@ -9,6 +9,7 @@ Adds:
 
 import json
 import asyncio
+import re
 import uuid
 from typing import Any, AsyncIterator
 
@@ -212,7 +213,7 @@ async def chat(request: ChatRequest):
 
     except Exception as exc:
         logger.exception("Chat error")
-        return ChatResponse(session_id=sid, response="", error=str(exc))
+        return ChatResponse(session_id=sid, response="", error="An internal error occurred. Please try again.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -264,7 +265,7 @@ async def _sse_generator(request: ChatRequest) -> AsyncIterator[str]:
 
     except Exception as exc:
         logger.exception("Streaming chat error")
-        yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
+        yield f"data: {json.dumps({'type': 'error', 'content': 'An internal error occurred. Please try again.'})}\n\n"
         yield "data: [DONE]\n\n"
 
 
@@ -343,7 +344,6 @@ async def review_code(request: CodeReviewRequest):
         )
 
         # Extract JSON from the response
-        import re
         json_match = re.search(r"\{[\s\S]*\}", raw)
         if not json_match:
             return CodeReviewResponse(
@@ -375,7 +375,7 @@ async def review_code(request: CodeReviewRequest):
             summary="Review failed",
             issues=[],
             score=0,
-            error=str(exc),
+            error="An internal error occurred while reviewing the code.",
         )
 
 

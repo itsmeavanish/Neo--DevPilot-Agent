@@ -45,12 +45,16 @@ class ConfigManager {
     try {
       const raw = await AsyncStorage.getItem(STORAGE_KEY);
       if (raw) this._profiles = JSON.parse(raw);
-    } catch { /* ignore */ }
+    } catch {
+      // AsyncStorage unavailable or data corrupt — use default profile
+    }
 
     try {
       const activeId = await AsyncStorage.getItem(ACTIVE_KEY);
       if (activeId) this._activeId = activeId;
-    } catch { /* ignore */ }
+    } catch {
+      // AsyncStorage unavailable — use default active profile
+    }
 
     // Sync API config
     this._syncApiConfig();
