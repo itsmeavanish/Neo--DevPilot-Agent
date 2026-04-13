@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: jarvis
+    env: docker
+    dockerfilePath: ./Dockerfile.cloud
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: JARVIS_API_KEY
+        sync: false
+      - key: JARVIS_LLM_PROVIDER
+        value: openai
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: JARVIS_KAFKA_ENABLED
+        value: "false"
+      - key: JARVIS_DEBUG
+        value: "false"
+      - key: JARVIS_LOG_LEVEL
+        value: INFO

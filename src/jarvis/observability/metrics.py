@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, Callable
-from threading import Lock
+from threading import Lock, RLock
 
 from jarvis.core.logging import get_logger
 
@@ -68,7 +68,7 @@ class Metric:
         self.description = description
         self.metric_type = metric_type
         self.label_names = labels or []
-        self._lock = Lock()
+        self._lock = RLock()
         self._values: dict[tuple, MetricValue] = {}
 
     def _label_key(self, labels: dict[str, str]) -> tuple:
@@ -238,7 +238,7 @@ class MetricsRegistry:
 
     def __init__(self):
         self._metrics: dict[str, Metric] = {}
-        self._lock = Lock()
+        self._lock = RLock()
 
     def register(self, metric: Metric) -> Metric:
         """Register a metric."""

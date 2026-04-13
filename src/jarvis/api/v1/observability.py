@@ -29,6 +29,7 @@ async def get_metrics():
 
 
 @router.get("/metrics/prometheus", response_class=PlainTextResponse)
+@router.get("/prometheus", response_class=PlainTextResponse)
 async def get_prometheus_metrics():
     """
     Get metrics in Prometheus format.

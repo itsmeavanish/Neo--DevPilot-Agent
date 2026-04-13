@@ -86,6 +86,21 @@ def get_manager():
 # IDE Status Endpoints
 # ═══════════════════════════════════════════════════════════════
 
+@router.get("/adapters")
+async def list_adapters():
+    """
+    List all available IDE adapters.
+    """
+    manager = get_manager()
+    available = manager.list_available()
+    active = manager.active_adapter
+
+    return {
+        "adapters": [ide.value for ide in available],
+        "active": active.ide_type.value if active else None,
+    }
+
+
 @router.get("/status")
 async def get_ide_status():
     """
