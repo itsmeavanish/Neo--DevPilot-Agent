@@ -29,6 +29,7 @@ export const Colors = {
   green: '#3fb950',
   greenBg: '#0e2e14',
   greenLight: '#56d364',
+  greenBorder: 'rgba(63, 185, 80, 0.35)',
 
   red: '#f85149',
   redBg: '#2d0f0f',
@@ -44,6 +45,18 @@ export const Colors = {
 
   cyan: '#39c5cf',
   orange: '#f0883e',
+
+  blue: '#3b82f6',
+  blueLight: '#93c5fd',
+  blueBg: 'rgba(59, 130, 246, 0.12)',
+  blueBorder: 'rgba(59, 130, 246, 0.35)',
+
+  amber: '#f59e0b',
+  amberLight: '#fcd34d',
+  amberBg: 'rgba(245, 158, 11, 0.12)',
+  amberBorder: 'rgba(245, 158, 11, 0.35)',
+
+  codeBg: 'rgba(0, 0, 0, 0.35)',
 
   // Input
   input: '#21262d',

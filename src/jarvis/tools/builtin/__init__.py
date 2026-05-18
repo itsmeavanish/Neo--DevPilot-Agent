@@ -2,6 +2,12 @@
 
 # Import all tools to trigger registration
 from jarvis.tools.builtin.shell import RunCommandTool
+from jarvis.tools.builtin.paired_shell import RunPairedCommandTool
+from jarvis.tools.builtin.paired_fs import (
+    PairedReadFileTool,
+    PairedWriteFileTool,
+    PairedListDirectoryTool,
+)
 from jarvis.tools.builtin.file import ReadFileTool, WriteFileTool, ListDirectoryTool
 from jarvis.tools.builtin.git import GitTool
 from jarvis.tools.builtin.vscode import VSCodeTool
@@ -13,6 +19,10 @@ from jarvis.tools.builtin.ai_tools import CodeReviewTool, GenerateCodeTool, Expl
 
 __all__ = [
     "RunCommandTool",
+    "RunPairedCommandTool",
+    "PairedReadFileTool",
+    "PairedWriteFileTool",
+    "PairedListDirectoryTool",
     "ReadFileTool",
     "WriteFileTool",
     "ListDirectoryTool",

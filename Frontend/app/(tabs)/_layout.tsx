@@ -1,10 +1,9 @@
 import { Tabs } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { Colors } from '@/lib/theme';
 import { View, Text, StyleSheet } from 'react-native';
 import { useState, useEffect } from 'react';
-import { checkHealth } from '@/lib/api';
-
+import { checkHealth } from '../../lib/api';
+import  { Colors } from '../../lib/theme';
 function TabBarIcon({ name, color, size }: { name: keyof typeof Ionicons.glyphMap; color: string; size: number }) {
   return <Ionicons name={name} size={size} color={color} />;
 }
@@ -98,6 +97,14 @@ export default function TabLayout() {
         options={{
           title: 'Devices',
           tabBarIcon: ({ color, size }) => <TabBarIcon name="laptop-outline" color={color} size={size} />,
+        }}
+      />
+      <Tabs.Screen
+        name="mission"
+        options={{
+          title: 'Mission',
+          tabBarLabel: 'Mission',
+          tabBarIcon: ({ color, size }) => <TabBarIcon name="pulse" color={color} size={size} />,
         }}
       />
       <Tabs.Screen

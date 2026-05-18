@@ -14,6 +14,10 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from jarvis.core.logging import get_logger
+
+logger = get_logger("jarvis.api.mobile")
+
 router = APIRouter()
 
 
@@ -562,15 +566,27 @@ async def _check_ollama_available() -> tuple[bool, str]:
 
 
 async def _check_copilot_available() -> tuple[bool, str]:
-    """Check if GitHub Copilot CLI is available."""
+    """Check if GitHub Copilot is available (VS Code or CLI)."""
+    # Try VS Code Copilot first (more reliable if user has VS Code setup)
     try:
-        from jarvis.llm.providers.copilot import CopilotClient
-        client = CopilotClient()
-        is_available = await client.is_available()
-        if is_available:
-            return True, "GitHub Copilot CLI (authenticated)"
+        from jarvis.llm.providers.vscode_copilot import get_vscode_copilot
+        vscode_provider = get_vscode_copilot()
+        vscode_available, vscode_message = await vscode_provider.check_available()
+        if vscode_available:
+            return True, f"VS Code Copilot: {vscode_message}"
+    except Exception as e:
+        logger.debug(f"VS Code Copilot check failed: {e}")
+
+    # Fallback to CLI method
+    try:
+        from jarvis.llm.providers.copilot_cli import get_copilot_cli
+        cli_provider = get_copilot_cli()
+        cli_available, cli_message = await cli_provider.check_available()
+        if cli_available:
+            return True, f"CLI Copilot: {cli_message}"
         else:
-            return False, "Install: gh extension install github/gh-copilot"
+            # Return helpful message for setup
+            return False, "GitHub Copilot not available. Install GitHub Copilot extension in VS Code, or fix GitHub CLI authentication."
     except Exception as e:
         return False, f"Copilot error: {str(e)}"
 
@@ -645,6 +661,96 @@ async def set_ai_provider(request: SetProviderRequest):
     return {"success": True, "provider": request.provider, "message": f"AI provider set to {request.provider}"}
 
 
+# ═══════════════════════════════════════════════════════════════
+# Copilot Model Selection Endpoints
+# ═══════════════════════════════════════════════════════════════
+
+class CopilotModelRequest(BaseModel):
+    """Request to set Copilot model."""
+    model: str
+
+
+class CopilotModelsResponse(BaseModel):
+    """Available Copilot models response."""
+    current: str
+    models: dict[str, list[str]]  # Category -> list of models
+
+
+@router.get("/copilot/models", response_model=CopilotModelsResponse)
+async def get_copilot_models():
+    """Get available Copilot models organized by category."""
+    try:
+        from jarvis.llm.providers.copilot_cli import get_copilot_cli
+        provider = get_copilot_cli()
+
+        return CopilotModelsResponse(
+            current=provider.get_current_model(),
+            models=provider.get_available_models()
+        )
+    except Exception as e:
+        return CopilotModelsResponse(
+            current="gpt-5.2-codex",
+            models={
+                "Error": [f"Failed to load models: {str(e)}"]
+            }
+        )
+
+
+@router.post("/copilot/models/set")
+async def set_copilot_model(request: CopilotModelRequest):
+    """Set the current Copilot model."""
+    try:
+        from jarvis.llm.providers.copilot_cli import get_copilot_cli
+        provider = get_copilot_cli()
+        provider.set_model(request.model)
+
+        return {
+            "success": True,
+            "model": request.model,
+            "message": f"Copilot model set to {request.model}"
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"Failed to set model: {str(e)}"
+        }
+
+
+@router.get("/copilot/status")
+async def get_copilot_status():
+    """Get detailed Copilot status including authentication and model."""
+    try:
+        from jarvis.llm.providers.copilot_cli import get_copilot_cli
+        provider = get_copilot_cli()
+
+        # Check authentication
+        auth_ok, auth_message = await provider.check_github_auth()
+
+        # Check Copilot access
+        copilot_ok, copilot_message = await provider.check_copilot_access()
+
+        return {
+            "authentication": {
+                "status": "authenticated" if auth_ok else "not_authenticated",
+                "message": auth_message
+            },
+            "copilot": {
+                "status": "available" if copilot_ok else "unavailable",
+                "message": copilot_message
+            },
+            "model": {
+                "current": provider.get_current_model(),
+                "available_count": len([model for models in provider.get_available_models().values() for model in models])
+            }
+        }
+    except Exception as e:
+        return {
+            "authentication": {"status": "error", "message": f"Error: {str(e)}"},
+            "copilot": {"status": "error", "message": f"Error: {str(e)}"},
+            "model": {"current": "unknown", "available_count": 0}
+        }
+
+
 @router.post("/project/ai/ask", response_model=AIResponse)
 async def ask_ai(request: AIAskRequest):
     """Ask AI for help using the selected provider."""
@@ -662,38 +768,69 @@ async def ask_ai(request: AIAskRequest):
 
     # Use the selected provider
     if _current_ai_provider == "copilot":
+        # Try VS Code Copilot first, then fallback to CLI
+
+        # Method 1: VS Code Copilot (preferred - works with existing VS Code setup)
         try:
-            from jarvis.llm.providers.copilot import CopilotClient
+            from jarvis.llm.providers.vscode_copilot import get_vscode_copilot
+            vscode_provider = get_vscode_copilot()
+            vscode_available, vscode_message = await vscode_provider.check_available()
 
-            client = CopilotClient(timeout=settings.copilot_timeout)
+            if vscode_available:
+                response = await vscode_provider.chat(
+                    prompt=full_prompt,
+                    context=request.code_context,
+                    system_prompt=system_prompt
+                )
 
-            if not await client.is_available():
+                if not response.startswith("Error:"):
+                    return AIResponse(
+                        status="success",
+                        response=response
+                    )
+        except Exception as e:
+            logger.debug(f"VS Code Copilot failed: {e}")
+
+        # Method 2: GitHub CLI Copilot (fallback)
+        try:
+            from jarvis.llm.providers.copilot_cli import get_copilot_cli
+            cli_provider = get_copilot_cli()
+
+            # Check if available
+            cli_available, cli_message = await cli_provider.check_available()
+            if cli_available:
+                response = await cli_provider.chat(
+                    prompt=full_prompt,
+                    context=request.code_context,
+                    system_prompt=system_prompt
+                )
+
+                if not response.startswith("Error:"):
+                    return AIResponse(
+                        status="success",
+                        response=response
+                    )
+                else:
+                    return AIResponse(
+                        status="error",
+                        response="",
+                        error=response
+                    )
+            else:
                 return AIResponse(
                     status="error",
                     response="",
-                    error=(
-                        "GitHub Copilot CLI not available. Please ensure:\n"
-                        "1. GitHub CLI is installed (gh)\n"
-                        "2. Copilot extension: gh extension install github/gh-copilot\n"
-                        "3. Authenticated: gh auth login"
-                    )
+                    error=f"GitHub Copilot not available: {cli_message}"
                 )
-
-            response = await client.generate(
-                prompt=full_prompt,
-                system=system_prompt
-            )
-
-            return AIResponse(
-                status="success",
-                response=response
-            )
-        except LLMConnectionError as e:
-            return AIResponse(status="error", response="", error=str(e))
-        except LLMResponseError as e:
-            return AIResponse(status="error", response="", error=str(e))
         except Exception as e:
-            return AIResponse(status="error", response="", error=f"Copilot error: {str(e)}")
+            return AIResponse(status="error", response="", error=f"Copilot CLI error: {str(e)}")
+
+        # If both methods failed
+        return AIResponse(
+            status="error",
+            response="",
+            error="GitHub Copilot not available. Please install GitHub Copilot extension in VS Code or authenticate with GitHub CLI."
+        )
 
     elif _current_ai_provider == "openai":
         if not settings.openai_api_key:
@@ -794,6 +931,11 @@ async def ask_ai(request: AIAskRequest):
 # GitHub Authentication Endpoints
 # ═══════════════════════════════════════════════════════════════
 
+# Store GitHub token in memory (in production, use secure storage)
+_github_token: Optional[str] = None
+_github_username: Optional[str] = None
+
+
 class GitHubAuthStatus(BaseModel):
     """GitHub authentication status."""
     authenticated: bool
@@ -801,6 +943,7 @@ class GitHubAuthStatus(BaseModel):
     account_type: Optional[str] = None
     scopes: list[str] = []
     message: str
+    has_token: bool = False  # Whether a token is stored for API access
 
 
 class GitHubLoginResponse(BaseModel):
@@ -935,6 +1078,12 @@ async def github_login():
 @router.post("/github/auth/logout")
 async def github_logout():
     """Logout from GitHub."""
+    global _github_token, _github_username
+
+    # Clear stored token
+    _github_token = None
+    _github_username = None
+
     gh_path = _get_gh_path()
 
     try:
@@ -958,6 +1107,118 @@ async def github_logout():
         return {"success": True, "message": "Logged out from GitHub"}
     except Exception as e:
         return {"success": False, "message": f"Logout failed: {str(e)}"}
+
+
+# ═══════════════════════════════════════════════════════════════
+# GitHub Token Management (for Cloud Copilot API)
+# ═══════════════════════════════════════════════════════════════
+
+class GitHubTokenRequest(BaseModel):
+    """Request to set GitHub token."""
+    token: str
+
+
+class GitHubTokenResponse(BaseModel):
+    """Response for GitHub token operations."""
+    success: bool
+    message: str
+    username: Optional[str] = None
+
+
+@router.post("/github/token/set", response_model=GitHubTokenResponse)
+async def set_github_token(request: GitHubTokenRequest):
+    """
+    Set GitHub Personal Access Token for Copilot API access.
+
+    This allows using GitHub Copilot from cloud deployment!
+
+    To create a token:
+    1. Go to https://github.com/settings/tokens
+    2. Create a new token (classic) with 'copilot' scope
+    3. Copy and paste it here
+    """
+    global _github_token, _github_username
+
+    token = request.token.strip()
+    if not token:
+        return GitHubTokenResponse(
+            success=False,
+            message="Token cannot be empty"
+        )
+
+    # Validate token by checking GitHub API
+    import aiohttp
+    try:
+        async with aiohttp.ClientSession() as session:
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/json",
+            }
+            async with session.get("https://api.github.com/user", headers=headers) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    username = data.get("login", "unknown")
+
+                    # Store the token
+                    _github_token = token
+                    _github_username = username
+
+                    # Also set it in the Copilot API provider
+                    try:
+                        from jarvis.llm.providers.copilot_api import set_copilot_token
+                        set_copilot_token(token)
+                    except ImportError:
+                        pass
+
+                    return GitHubTokenResponse(
+                        success=True,
+                        message=f"Token saved! Authenticated as @{username}",
+                        username=username
+                    )
+                elif resp.status == 401:
+                    return GitHubTokenResponse(
+                        success=False,
+                        message="Invalid token. Please check and try again."
+                    )
+                else:
+                    return GitHubTokenResponse(
+                        success=False,
+                        message=f"GitHub API error: {resp.status}"
+                    )
+    except Exception as e:
+        return GitHubTokenResponse(
+            success=False,
+            message=f"Connection error: {str(e)}"
+        )
+
+
+@router.get("/github/token/status", response_model=GitHubTokenResponse)
+async def get_github_token_status():
+    """Check if a GitHub token is configured."""
+    global _github_token, _github_username
+
+    if _github_token:
+        return GitHubTokenResponse(
+            success=True,
+            message=f"Token configured for @{_github_username}",
+            username=_github_username
+        )
+    else:
+        return GitHubTokenResponse(
+            success=False,
+            message="No token configured. Add your GitHub token in Settings."
+        )
+
+
+@router.post("/github/token/clear")
+async def clear_github_token():
+    """Clear the stored GitHub token."""
+    global _github_token, _github_username
+
+    _github_token = None
+    _github_username = None
+
+    return {"success": True, "message": "Token cleared"}
 
 
 # ═══════════════════════════════════════════════════════════════

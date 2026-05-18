@@ -1,113 +1,185 @@
 /**
- * Config manager – persists and manages multiple server profiles
- * using AsyncStorage so settings survive app restarts.
+ * Persisted app configuration (backend URL, pairing, optional API key).
+ * Uses SecureStore so secrets survive restarts.
  */
 
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import { updateApiConfig } from './api';
+import * as SecureStore from 'expo-secure-store';
 
-const STORAGE_KEY = 'jarvis_server_profiles';
-const ACTIVE_KEY = 'jarvis_active_profile';
+const STORAGE_KEYS = {
+  BACKEND_URL: 'jarvis_backend_url',
+  PAIRING_CODE: 'jarvis_pairing_code',
+  LAPTOP_NAME: 'jarvis_laptop_name',
+  IS_PAIRED: 'jarvis_is_paired',
+  API_KEY: 'jarvis_api_key',
+  WORKSPACE_ROOT: 'jarvis_workspace_root',
+} as const;
 
-export interface ServerProfile {
-  id: string;
-  name: string;
-  url: string;
-  apiKey: string;
-  isDefault?: boolean;
-}
-
-const DEFAULT_PROFILE: ServerProfile = {
-  id: 'default',
-  name: 'Local',
-  url: 'http://localhost:8000',
-  apiKey: '',
-  isDefault: true,
-};
+/** Default public API base (ngrok). Override in Settings or use localhost only for same-machine dev. */
+export const DEFAULT_BACKEND_URL = 'https://precommercial-nubbly-theda.ngrok-free.dev';
 
 class ConfigManager {
-  private _profiles: ServerProfile[] = [DEFAULT_PROFILE];
-  private _activeId: string = 'default';
+  private _backendUrl: string = DEFAULT_BACKEND_URL;
+  private _pairingCode: string = '';
+  private _laptopName: string = '';
+  private _isPaired: boolean = false;
+  private _apiKey: string = '';
+  private _workspaceRoot: string = '';
+  private initialized = false;
 
-  get serverProfiles(): ServerProfile[] {
-    return this._profiles;
-  }
-
-  get activeProfile(): ServerProfile | null {
-    return this._profiles.find((p) => p.id === this._activeId) ?? null;
+  get isBackendUrlUnsafe(): boolean {
+    return (
+      this._backendUrl.includes('localhost') ||
+      this._backendUrl.includes('127.0.0.1')
+    );
   }
 
   get backendUrl(): string {
-    return this.activeProfile?.url ?? DEFAULT_PROFILE.url;
+    return this._backendUrl;
+  }
+
+  get pairingCode(): string {
+    return this._pairingCode;
+  }
+
+  get laptopName(): string {
+    return this._laptopName;
+  }
+
+  get isPaired(): boolean {
+    return this._isPaired && this._pairingCode.length > 0;
+  }
+
+  get apiKey(): string {
+    return this._apiKey;
+  }
+
+  get workspaceRoot(): string {
+    return this._workspaceRoot;
   }
 
   async init(): Promise<void> {
-    try {
-      const raw = await AsyncStorage.getItem(STORAGE_KEY);
-      if (raw) this._profiles = JSON.parse(raw);
-    } catch {
-      // AsyncStorage unavailable or data corrupt — use default profile
-    }
+    if (this.initialized) return;
 
     try {
-      const activeId = await AsyncStorage.getItem(ACTIVE_KEY);
-      if (activeId) this._activeId = activeId;
+      const savedUrl = await SecureStore.getItemAsync(STORAGE_KEYS.BACKEND_URL);
+      const savedCode = await SecureStore.getItemAsync(STORAGE_KEYS.PAIRING_CODE);
+      const savedName = await SecureStore.getItemAsync(STORAGE_KEYS.LAPTOP_NAME);
+      const savedPaired = await SecureStore.getItemAsync(STORAGE_KEYS.IS_PAIRED);
+      const savedKey = await SecureStore.getItemAsync(STORAGE_KEYS.API_KEY);
+      const savedWorkspace = await SecureStore.getItemAsync(STORAGE_KEYS.WORKSPACE_ROOT);
+
+      if (savedUrl) this._backendUrl = savedUrl;
+      if (savedCode) this._pairingCode = savedCode;
+      if (savedName) this._laptopName = savedName;
+      if (savedPaired) this._isPaired = savedPaired === 'true';
+      if (savedKey) this._apiKey = savedKey;
+      if (savedWorkspace) this._workspaceRoot = savedWorkspace;
+    } catch (e) {
+      console.warn('Config init:', e);
+    }
+
+    this.initialized = true;
+  }
+
+  async pairWithLaptop(code: string, laptopName: string = 'My Laptop'): Promise<void> {
+    this._pairingCode = code.toUpperCase().trim();
+    this._laptopName = laptopName;
+    this._isPaired = true;
+
+    try {
+      await SecureStore.setItemAsync(STORAGE_KEYS.PAIRING_CODE, this._pairingCode);
+      await SecureStore.setItemAsync(STORAGE_KEYS.LAPTOP_NAME, this._laptopName);
+      await SecureStore.setItemAsync(STORAGE_KEYS.IS_PAIRED, 'true');
+    } catch (e) {
+      console.error('Failed to save pairing:', e);
+    }
+  }
+
+  async unpair(): Promise<void> {
+    this._pairingCode = '';
+    this._laptopName = '';
+    this._isPaired = false;
+
+    try {
+      await SecureStore.deleteItemAsync(STORAGE_KEYS.PAIRING_CODE);
+      await SecureStore.deleteItemAsync(STORAGE_KEYS.LAPTOP_NAME);
+      await SecureStore.deleteItemAsync(STORAGE_KEYS.IS_PAIRED);
+    } catch (e) {
+      console.error('Failed to clear pairing:', e);
+    }
+  }
+
+  async setBackendUrl(url: string): Promise<void> {
+    this._backendUrl = url.replace(/\/$/, '');
+    try {
+      await SecureStore.setItemAsync(STORAGE_KEYS.BACKEND_URL, this._backendUrl);
+    } catch (e) {
+      console.error('Failed to save backend URL:', e);
+    }
+  }
+
+  async setWorkspaceRoot(path: string): Promise<void> {
+    this._workspaceRoot = path.trim();
+    try {
+      if (this._workspaceRoot) {
+        await SecureStore.setItemAsync(STORAGE_KEYS.WORKSPACE_ROOT, this._workspaceRoot);
+      } else {
+        await SecureStore.deleteItemAsync(STORAGE_KEYS.WORKSPACE_ROOT);
+      }
+    } catch (e) {
+      console.error('Failed to save workspace root:', e);
+    }
+  }
+
+  async setApiKey(key: string): Promise<void> {
+    this._apiKey = key;
+    try {
+      if (key) {
+        await SecureStore.setItemAsync(STORAGE_KEYS.API_KEY, key);
+      } else {
+        await SecureStore.deleteItemAsync(STORAGE_KEYS.API_KEY);
+      }
+    } catch (e) {
+      console.error('Failed to save API key:', e);
+    }
+  }
+
+  async testLaptopConnection(): Promise<{
+    online: boolean;
+    hostname?: string;
+    platform?: string;
+  }> {
+    if (!this._pairingCode) {
+      return { online: false };
+    }
+
+    try {
+      const response = await fetch(
+        `${this._backendUrl}/api/v1/ws/agents/${this._pairingCode}`,
+        {
+          headers: {
+            'ngrok-skip-browser-warning': 'true',
+            ...(this._apiKey ? { 'X-API-Key': this._apiKey } : {}),
+          },
+        }
+      );
+
+      if (response.ok) {
+        const data = await response.json();
+        if (data.success && data.agent) {
+          return {
+            online: data.agent.status === 'online',
+            hostname: data.agent.hostname,
+            platform: data.agent.platform,
+          };
+        }
+      }
+      return { online: false };
     } catch {
-      // AsyncStorage unavailable — use default active profile
+      return { online: false };
     }
-
-    // Sync API config
-    this._syncApiConfig();
-  }
-
-  async addProfile(profile: Omit<ServerProfile, 'id'>): Promise<ServerProfile> {
-    const newProfile: ServerProfile = {
-      ...profile,
-      id: Date.now().toString(),
-    };
-    this._profiles.push(newProfile);
-    await this._save();
-    return newProfile;
-  }
-
-  async updateProfile(id: string, updates: Partial<ServerProfile>): Promise<void> {
-    const idx = this._profiles.findIndex((p) => p.id === id);
-    if (idx !== -1) {
-      this._profiles[idx] = { ...this._profiles[idx], ...updates };
-      await this._save();
-      if (id === this._activeId) this._syncApiConfig();
-    }
-  }
-
-  async removeProfile(id: string): Promise<void> {
-    if (id === 'default') return; // Cannot remove default
-    this._profiles = this._profiles.filter((p) => p.id !== id);
-    if (this._activeId === id) {
-      this._activeId = 'default';
-      await AsyncStorage.setItem(ACTIVE_KEY, this._activeId);
-      this._syncApiConfig();
-    }
-    await this._save();
-  }
-
-  async setActive(id: string): Promise<void> {
-    if (!this._profiles.find((p) => p.id === id)) return;
-    this._activeId = id;
-    await AsyncStorage.setItem(ACTIVE_KEY, id);
-    this._syncApiConfig();
-  }
-
-  private _syncApiConfig(): void {
-    const profile = this.activeProfile;
-    if (profile) {
-      updateApiConfig({ baseUrl: profile.url, apiKey: profile.apiKey });
-    }
-  }
-
-  private async _save(): Promise<void> {
-    await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(this._profiles));
   }
 }
 
-const configManager = new ConfigManager();
+export const configManager = new ConfigManager();
 export default configManager;

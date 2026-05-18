@@ -29,6 +29,11 @@ from jarvis.core.exceptions import (
 from jarvis.self_heal.engine import SelfHealEngine, get_self_heal_engine
 from jarvis.devices.distributor import TaskDistributor, get_task_distributor
 from jarvis.devices.registry import DeviceRegistry, get_device_registry
+from jarvis.execution_context import (
+    clear_pairing_context,
+    set_pairing_context,
+    workspace_from_context,
+)
 
 logger = get_logger("jarvis.agent.loop")
 
@@ -176,11 +181,13 @@ class AgentLoop:
         Returns:
             ExecutionResult with status and outputs
         """
-        task_id = str(uuid4())[:12]
+        exec_context_early = context or {}
+        task_id = str(exec_context_early.get("task_id") or "")[:12] or str(uuid4())[:12]
         started_at = datetime.utcnow()
 
         self.logger.info(f"Task {task_id}: Starting execution of '{intent}'")
 
+        pairing_tokens: tuple | None = None
         try:
             # ═══════════════════════════════════════════════
             # PHASE 1: OBSERVE & ORIENT
@@ -188,9 +195,29 @@ class AgentLoop:
 
             # Build execution context
             exec_context = context or {}
+            exec_context["task_id"] = task_id
             if "cwd" not in exec_context:
                 import os
                 exec_context["cwd"] = os.getcwd()
+
+            ws = workspace_from_context(exec_context)
+            if ws and not exec_context.get("workspace_root"):
+                exec_context["workspace_root"] = ws
+
+            pc = exec_context.get("pairing_code")
+            if pc:
+                caps = exec_context.get("capabilities")
+                if isinstance(caps, str):
+                    caps = [c.strip() for c in caps.split(",") if c.strip()]
+                elif caps is not None and not isinstance(caps, list):
+                    caps = None
+                elif isinstance(caps, list) and len(caps) == 0:
+                    caps = None
+                pairing_tokens = set_pairing_context(
+                    str(pc).strip().upper(),
+                    caps,
+                    workspace_from_context(exec_context),
+                )
 
             # ═══════════════════════════════════════════════
             # PRE-EXECUTION: Health Check
@@ -259,7 +286,7 @@ class AgentLoop:
                 if high_risk_steps:
                     approved = await self._request_approval(plan, high_risk_steps)
                     if not approved:
-                        return ExecutionResult.cancelled("User declined approval")
+                        return ExecutionResult.cancelled("User declined approval", task_id=task_id)
 
             # ═══════════════════════════════════════════════
             # PHASE 4: ACT - Execute Plan
@@ -294,6 +321,7 @@ class AgentLoop:
                     error="; ".join(error_msgs),
                     plan=plan,
                     step_results=step_results,
+                    task_id=task_id,
                 )
 
             # Phase 2: Store successful pattern in memory
@@ -317,19 +345,23 @@ class AgentLoop:
                 plan=plan,
                 step_results=step_results,
                 message=f"Completed {len(step_results)} steps successfully",
+                task_id=task_id,
             )
 
         except PlanningError as e:
             self.logger.error(f"Task {task_id}: Planning failed - {e}")
-            return ExecutionResult.failure(f"Planning failed: {e}")
+            return ExecutionResult.failure(f"Planning failed: {e}", task_id=task_id)
 
         except ExecutionError as e:
             self.logger.error(f"Task {task_id}: Execution failed - {e}")
-            return ExecutionResult.failure(f"Execution failed: {e}")
+            return ExecutionResult.failure(f"Execution failed: {e}", task_id=task_id)
 
         except Exception as e:
             self.logger.exception(f"Task {task_id}: Unexpected error")
-            return ExecutionResult.failure(f"Unexpected error: {e}")
+            return ExecutionResult.failure(f"Unexpected error: {e}", task_id=task_id)
+        finally:
+            if pairing_tokens is not None:
+                clear_pairing_context(pairing_tokens)
 
     async def _request_approval(self, plan: Plan, steps: list[PlanStep]) -> bool:
         """

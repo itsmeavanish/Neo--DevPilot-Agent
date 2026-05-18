@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "JARVIS",
+    "name": "Neo Jarvis",
     "slug": "jarvis-devpilot",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -21,6 +21,7 @@
         "backgroundColor": "#0a0a0a"
       },
       "package": "com.devpilot.jarvis",
+      "versionCode": 1,
       "permissions": [
         "android.permission.INTERNET",
         "android.permission.ACCESS_NETWORK_STATE"
@@ -29,16 +30,22 @@
     "web": {
       "bundler": "metro",
       "output": "static",
-      "favicon": "./assets/favicon.png"
+      "favicon": "./assets/icon.png"
     },
     "plugins": [
-      "expo-router"
+      "expo-router",
+      "expo-secure-store",
+      "expo-font"
     ],
     "extra": {
+      "serverUrl": "https://precommercial-nubbly-theda.ngrok-free.dev",
+      "router": {
+        "origin": false
+      },
       "eas": {
-        "projectId": "your-project-id"
+        "projectId": "b51a1c71-98d2-432d-ad41-91b94c29b635"
       }
     },
-    "owner": "your-expo-username"
+    "owner": "avanish633"
   }
 }

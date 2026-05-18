@@ -163,9 +163,9 @@ tool_registry = ToolRegistry()
 
 
 def load_builtin_tools() -> None:
-    """Load all built-in tools into the registry."""
     from jarvis.tools.builtin import (
         shell,
+        paired_shell,
         file,
         git,
         vscode,
@@ -174,8 +174,7 @@ def load_builtin_tools() -> None:
         log,
         system,
     )
-
-    # Tools are auto-registered via decorator
+        # Tools are auto-registered via decorator
     logger.info(f"Loaded {len(tool_registry)} built-in tools")
 
 

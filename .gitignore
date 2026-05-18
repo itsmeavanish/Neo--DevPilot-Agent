@@ -10,7 +10,7 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
+/lib/
 lib64/
 parts/
 sdist/
@@ -89,3 +89,6 @@ node_modules/
 # EAS Build
 .expo/
 build/
+
+# Local Expo export / test artifacts (do not commit)
+Frontend/test-build/

@@ -105,7 +105,7 @@ class Planner:
         """
         if not self.llm_client:
             # Fallback to simple parsing if no LLM
-            return self._parse_simple_intent(intent)
+            return self._parse_simple_intent(intent, context)
 
         if not self.tool_registry:
             raise PlanningError("Tool registry not configured")
@@ -121,6 +121,17 @@ class Planner:
         user_message = f"Intent: {intent}"
         if context:
             user_message += f"\n\nContext:\n{json.dumps(context, indent=2)}"
+        if context and context.get("pairing_code"):
+            ws = context.get("workspace_root") or context.get("cwd")
+            ws_line = f"\nProject workspace on laptop: {ws}" if ws else ""
+            user_message += (
+                "\n\nIMPORTANT: Execution targets the PAIRED REMOTE LAPTOP."
+                f"{ws_line}\n"
+                "- Shell: `run_paired_command` with `{\"command\": \"...\"}` (never `run_command`).\n"
+                "- Read/list files: `paired_read_file`, `paired_list_directory` "
+                "(paths relative to workspace when set).\n"
+                "- Write files: `paired_write_file` with full `content` (never local `write_file`)."
+            )
 
         self.logger.info(f"Creating plan for: {intent}")
 
@@ -199,7 +210,12 @@ Parameters:
 
         return plan
 
-    def _parse_simple_intent(self, intent: str) -> Plan:
+    def _shell_tool(self, context: dict[str, Any] | None) -> str:
+        if context and context.get("pairing_code"):
+            return "run_paired_command"
+        return "run_command"
+
+    def _parse_simple_intent(self, intent: str, context: dict[str, Any] | None = None) -> Plan:
         """
         Simple intent parsing without LLM.
 
@@ -207,47 +223,85 @@ Parameters:
         """
         intent_lower = intent.lower().strip()
         plan = Plan(intent=intent)
+        remote = context and bool(context.get("pairing_code"))
+        shell_tool = self._shell_tool(context)
 
         # Git status
         if intent_lower in ("git status", "status", "show git status"):
-            plan.add_step("git", {"operation": "status"}, "Check git status", RiskLevel.LOW)
+            if remote:
+                plan.add_step(shell_tool, {"command": "git status"}, "Check git status (remote)", RiskLevel.LOW)
+            else:
+                plan.add_step("git", {"operation": "status"}, "Check git status", RiskLevel.LOW)
 
         # Git diff
         elif intent_lower in ("git diff", "show diff", "diff"):
-            plan.add_step("git", {"operation": "diff"}, "Show git diff", RiskLevel.LOW)
+            if remote:
+                plan.add_step(shell_tool, {"command": "git diff"}, "Show git diff (remote)", RiskLevel.LOW)
+            else:
+                plan.add_step("git", {"operation": "diff"}, "Show git diff", RiskLevel.LOW)
 
         # Git log
         elif intent_lower.startswith("git log") or intent_lower == "show commits":
-            plan.add_step("git", {"operation": "log", "args": ["-10", "--oneline"]}, "Show recent commits", RiskLevel.LOW)
+            if remote:
+                plan.add_step(shell_tool, {"command": "git log -10 --oneline"}, "Show recent commits (remote)", RiskLevel.LOW)
+            else:
+                plan.add_step("git", {"operation": "log", "args": ["-10", "--oneline"]}, "Show recent commits", RiskLevel.LOW)
 
         # List files
         elif intent_lower.startswith("ls ") or intent_lower.startswith("list "):
             path = intent_lower.split(maxsplit=1)[1] if " " in intent_lower else "."
-            plan.add_step("list_directory", {"path": path}, f"List files in {path}", RiskLevel.LOW)
+            if remote:
+                plan.add_step(
+                    "paired_list_directory",
+                    {"path": path},
+                    f"List files in {path} (remote)",
+                    RiskLevel.LOW,
+                )
+            else:
+                plan.add_step("list_directory", {"path": path}, f"List files in {path}", RiskLevel.LOW)
 
         # Read file
         elif intent_lower.startswith("cat ") or intent_lower.startswith("read "):
             path = intent_lower.split(maxsplit=1)[1]
-            plan.add_step("read_file", {"path": path}, f"Read {path}", RiskLevel.LOW)
+            if remote:
+                plan.add_step(
+                    "paired_read_file",
+                    {"path": path},
+                    f"Read {path} (remote)",
+                    RiskLevel.LOW,
+                )
+            else:
+                plan.add_step("read_file", {"path": path}, f"Read {path}", RiskLevel.LOW)
 
         # System info
         elif intent_lower in ("system info", "system status", "health"):
-            plan.add_step("system_info", {"info_type": "health"}, "Check system health", RiskLevel.LOW)
+            if remote:
+                plan.add_step(
+                    shell_tool,
+                    {"command": "powershell -NoProfile -Command \"Get-CimInstance Win32_OperatingSystem | Select FreePhysicalMemory,TotalVisibleMemorySize\""},
+                    "Remote memory snapshot",
+                    RiskLevel.LOW,
+                )
+            else:
+                plan.add_step("system_info", {"info_type": "health"}, "Check system health", RiskLevel.LOW)
 
         # Open VS Code
         elif intent_lower.startswith("code ") or intent_lower.startswith("open "):
             path = intent_lower.split(maxsplit=1)[1] if " " in intent_lower else "."
-            plan.add_step("vscode", {"action": "open_folder", "path": path}, f"Open {path} in VS Code", RiskLevel.LOW)
+            if remote:
+                plan.add_step(shell_tool, {"command": f'code "{path}"'}, f"Open {path} in VS Code (remote)", RiskLevel.MEDIUM)
+            else:
+                plan.add_step("vscode", {"action": "open_folder", "path": path}, f"Open {path} in VS Code", RiskLevel.LOW)
 
         # Run command (generic)
         elif intent_lower.startswith("run "):
             cmd = intent_lower[4:].strip()
-            plan.add_step("run_command", {"command": cmd}, f"Run: {cmd}", RiskLevel.MEDIUM)
+            plan.add_step(shell_tool, {"command": cmd}, f"Run: {cmd}", RiskLevel.MEDIUM)
 
         # Unknown - use as command if it looks like one
         elif " " in intent_lower and not any(c in intent_lower for c in "?!"):
             # Might be a command
-            plan.add_step("run_command", {"command": intent}, f"Run: {intent}", RiskLevel.MEDIUM)
+            plan.add_step(shell_tool, {"command": intent}, f"Run: {intent}", RiskLevel.MEDIUM)
             plan.reasoning = "Interpreted as shell command"
 
         else:

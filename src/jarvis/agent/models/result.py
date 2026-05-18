@@ -86,9 +86,18 @@ class ExecutionResult:
         self.duration_ms = int((self.completed_at - self.started_at).total_seconds() * 1000)
 
     @classmethod
-    def success(cls, plan: Plan, step_results: list[StepResult], message: str = "") -> "ExecutionResult":
+    def success(
+        cls,
+        plan: Plan,
+        step_results: list[StepResult],
+        message: str = "",
+        *,
+        task_id: str | None = None,
+    ) -> "ExecutionResult":
         """Create a successful result."""
+        tid = task_id or str(uuid4())[:12]
         result = cls(
+            task_id=tid,
             status=TaskStatus.COMPLETED,
             plan=plan,
             step_results=step_results,
@@ -98,9 +107,18 @@ class ExecutionResult:
         return result
 
     @classmethod
-    def failure(cls, error: str, plan: Plan | None = None, step_results: list[StepResult] | None = None) -> "ExecutionResult":
+    def failure(
+        cls,
+        error: str,
+        plan: Plan | None = None,
+        step_results: list[StepResult] | None = None,
+        *,
+        task_id: str | None = None,
+    ) -> "ExecutionResult":
         """Create a failed result."""
+        tid = task_id or str(uuid4())[:12]
         result = cls(
+            task_id=tid,
             status=TaskStatus.FAILED,
             plan=plan,
             step_results=step_results or [],
@@ -111,9 +129,10 @@ class ExecutionResult:
         return result
 
     @classmethod
-    def cancelled(cls, message: str = "Task was cancelled") -> "ExecutionResult":
+    def cancelled(cls, message: str = "Task was cancelled", *, task_id: str | None = None) -> "ExecutionResult":
         """Create a cancelled result."""
         result = cls(
+            task_id=task_id or str(uuid4())[:12],
             status=TaskStatus.CANCELLED,
             message=message,
         )

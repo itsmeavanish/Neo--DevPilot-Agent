@@ -10,9 +10,10 @@ import {
   Modal,
   ScrollView,
   RefreshControl,
+  Alert,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { Colors } from '@/lib/theme';
+import { Colors } from '../../lib/theme';
 import {
   listDirectory,
   readFile,
@@ -20,7 +21,8 @@ import {
   FileInfo,
   FileContent,
   ProjectInfo,
-} from '@/lib/api';
+} from '../../lib/api';
+import configManager from '../../lib/config';
 
 export default function FilesScreen() {
   const [currentPath, setCurrentPath] = useState('');
@@ -39,6 +41,13 @@ export default function FilesScreen() {
 
   // Navigation history
   const [history, setHistory] = useState<string[]>([]);
+  const [workspaceRoot, setWorkspaceRoot] = useState('');
+
+  useEffect(() => {
+    void configManager.init().then(() => {
+      setWorkspaceRoot(configManager.workspaceRoot);
+    });
+  }, []);
 
   const loadDirectory = useCallback(async (path: string, addToHistory = true) => {
     if (!path.trim()) {
@@ -171,6 +180,16 @@ export default function FilesScreen() {
     return colorMap[ext] || Colors.muted;
   };
 
+  const setAsProjectRoot = async () => {
+    if (!currentPath) return;
+    await configManager.setWorkspaceRoot(currentPath);
+    setWorkspaceRoot(currentPath);
+    Alert.alert(
+      'Project root set',
+      `Agent missions will use:\n${currentPath}\n\nOpen Mission to run multi-file tasks in this folder.`
+    );
+  };
+
   const formatSize = (bytes: number): string => {
     if (bytes === 0) return '0 B';
     const k = 1024;
@@ -246,8 +265,16 @@ export default function FilesScreen() {
                 color={showHidden ? Colors.primary : Colors.muted}
               />
             </TouchableOpacity>
+            <TouchableOpacity style={styles.projectRootBtn} onPress={() => void setAsProjectRoot()}>
+              <Ionicons name="folder-open" size={18} color={Colors.primary} />
+            </TouchableOpacity>
           </View>
         )}
+        {workspaceRoot ? (
+          <Text style={styles.workspaceHint} numberOfLines={2}>
+            Agent project: {workspaceRoot}
+          </Text>
+        ) : null}
       </View>
 
       {/* Project info */}
@@ -426,6 +453,15 @@ const styles = StyleSheet.create({
   },
   hiddenToggle: {
     padding: 6,
+  },
+  projectRootBtn: {
+    padding: 6,
+  },
+  workspaceHint: {
+    marginTop: 6,
+    color: Colors.primary,
+    fontSize: 11,
+    fontFamily: 'monospace',
   },
   projectInfo: {
     padding: 12,
