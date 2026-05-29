@@ -14,12 +14,14 @@ import json
 import os
 import socket
 import struct
+import base64
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Optional
 import platform
+from cryptography.fernet import Fernet
 
 from jarvis.core.logging import get_logger
 
@@ -32,6 +34,31 @@ class AccessMethod(str, Enum):
     SSH = "ssh"                      # SSH access (need credentials)
     WAKE_ON_LAN = "wol"             # Wake up first, then connect
     UNAVAILABLE = "unavailable"     # Cannot reach
+
+
+def _get_encryption_key() -> bytes:
+    """Get or generate encryption key derived from JARVIS_API_KEY."""
+    api_key = os.environ.get("JARVIS_API_KEY", "default-jarvis-key")
+    # Hash to ensure it's exactly 32 bytes for Fernet
+    digest = hashlib.sha256(api_key.encode()).digest()
+    return base64.urlsafe_b64encode(digest)
+
+def _encrypt_password(password: Optional[str]) -> Optional[str]:
+    if not password:
+        return None
+    f = Fernet(_get_encryption_key())
+    return f.encrypt(password.encode()).decode()
+
+def _decrypt_password(encrypted_password: Optional[str]) -> Optional[str]:
+    if not encrypted_password:
+        return None
+    try:
+        f = Fernet(_get_encryption_key())
+        return f.decrypt(encrypted_password.encode()).decode()
+    except Exception:
+        # If decryption fails (e.g. key changed), return the raw string
+        # as it might not be encrypted (legacy data) or return None.
+        return encrypted_password
 
 
 @dataclass
@@ -148,7 +175,7 @@ class UniversalLaptopController:
         credentials = LaptopCredentials(
             mac_address=mac_address,
             ssh_username=ssh_username,
-            ssh_password=ssh_password,  # TODO: Encrypt this
+            ssh_password=_encrypt_password(ssh_password),
         )
 
         laptop = UniversalLaptop(
@@ -339,6 +366,7 @@ class UniversalLaptopController:
         timeout: int
     ) -> dict:
         """Execute command via SSH."""
+        decrypted_password = _decrypt_password(laptop.credentials.ssh_password)
         try:
             # Use asyncssh if available, otherwise fall back to subprocess
             try:
@@ -348,7 +376,7 @@ class UniversalLaptopController:
                     laptop.ip_address,
                     port=laptop.credentials.ssh_port,
                     username=laptop.credentials.ssh_username,
-                    password=laptop.credentials.ssh_password,
+                    password=decrypted_password,
                     known_hosts=None
                 ) as conn:
                     result = await asyncio.wait_for(
