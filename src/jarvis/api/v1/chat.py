@@ -186,34 +186,31 @@ async def chat(request: ChatRequest):
         request.message,
     )
 
-    llm = await _get_llm_client()
-    if llm is None:
-        return ChatResponse(
-            session_id=sid,
-            response="",
-            error=(
-                "No LLM provider available. "
-                "Start Ollama ('ollama serve') or set JARVIS_OPENAI_API_KEY."
-            ),
-        )
+    from jarvis.llm.ai_service import generate_chat
+    from jarvis.runtime_llm import get_effective_ai_provider
 
-    try:
-        system = request.system_prompt or JARVIS_SYSTEM_PROMPT
-        reply = await llm.chat(messages=msgs, system=system)
+    system = request.system_prompt or JARVIS_SYSTEM_PROMPT
+    # Flatten recent history into prompt for providers that use single-shot generate
+    history_blob = ""
+    for m in msgs[:-1]:
+        history_blob += f"{m['role'].upper()}: {m['content']}\n\n"
+    full_user = f"{history_blob}USER: {request.message}" if history_blob else request.message
 
-        # Persist to server-side session history
-        server_history.append({"role": "user", "content": request.message})
-        server_history.append({"role": "assistant", "content": reply})
+    status, reply, _ = await generate_chat(
+        full_user,
+        system=system,
+        preferred_provider=get_effective_ai_provider() or "auto",
+    )
 
-        # Trim to max length
-        if len(server_history) > _MAX_HISTORY:
-            _sessions[sid] = server_history[-_MAX_HISTORY:]
+    if status != "success":
+        return ChatResponse(session_id=sid, response="", error=reply)
 
-        return ChatResponse(session_id=sid, response=reply)
+    server_history.append({"role": "user", "content": request.message})
+    server_history.append({"role": "assistant", "content": reply})
+    if len(server_history) > _MAX_HISTORY:
+        _sessions[sid] = server_history[-_MAX_HISTORY:]
 
-    except Exception as exc:
-        logger.exception("Chat error")
-        return ChatResponse(session_id=sid, response="", error="An internal error occurred. Please try again.")
+    return ChatResponse(session_id=sid, response=reply)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

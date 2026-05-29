@@ -290,6 +290,28 @@ export interface GitHubAuthStatus {
   account_type?: string;
   scopes: string[];
   message: string;
+  has_token?: boolean;
+}
+
+export interface IDEAgentActionResult {
+  handled: boolean;
+  success: boolean;
+  message: string;
+  steps: Record<string, unknown>[];
+  summary?: string;
+}
+
+/** IDE agent mode: git add/commit/push and other deterministic workflows on paired laptop. */
+export async function runIDEAgentAction(
+  intent: string,
+  workspace_root?: string
+): Promise<IDEAgentActionResult> {
+  await configManager.init();
+  return apiPost<IDEAgentActionResult>('/project/ai/agent-action', {
+    intent,
+    pairing_code: configManager.pairingCode?.trim().toUpperCase() || undefined,
+    workspace_root: workspace_root?.trim() || configManager.workspaceRoot?.trim() || undefined,
+  });
 }
 
 export interface DeviceInfo {
@@ -682,21 +704,29 @@ export interface OllamaConfigResponse {
 
 export async function setOllamaConfig(
   host = 'http://localhost:11434',
-  model = 'llama3.2'
+  model = 'llama3.2:1b',
+  pull = true
 ): Promise<OllamaConfigResponse> {
   try {
-    const hostResult = await executeCommand(`setx JARVIS_OLLAMA_HOST "${host}"`);
-    const modelResult = await executeCommand(`setx JARVIS_OLLAMA_MODEL "${model}"`);
-    if (hostResult.success && modelResult.success) {
-      return { success: true, message: 'Ollama configuration updated successfully', host, model };
-    }
-    return { success: false, message: 'Failed to set Ollama configuration' };
+    return await apiPost<OllamaConfigResponse>('/project/ai/ollama-config', {
+      host,
+      model,
+      pull,
+    });
   } catch (error: unknown) {
     return {
       success: false,
       message: error instanceof Error ? error.message : 'Failed to configure Ollama',
     };
   }
+}
+
+export async function getOllamaConfig(): Promise<{
+  host: string;
+  model: string;
+  default_small_model: string;
+}> {
+  return apiGet('/project/ai/ollama-config');
 }
 
 export async function getOllamaStatus(): Promise<OllamaConfigResponse> {

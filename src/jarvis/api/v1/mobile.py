@@ -10,9 +10,9 @@ import platform
 import subprocess
 import asyncio
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from jarvis.core.logging import get_logger
 
@@ -545,29 +545,63 @@ async def open_in_cursor(request: OpenPathRequest):
 # AI Provider Endpoints
 # ═══════════════════════════════════════════════════════════════
 
-# Global AI provider state
-_current_ai_provider = "ollama"
+# Global AI provider state (overridden by ~/.jarvis/llm_runtime.json when set)
+from jarvis.runtime_llm import (
+    DEFAULT_OLLAMA_MODEL,
+    get_effective_ai_provider,
+    get_effective_ollama_host,
+    get_effective_ollama_model,
+    get_runtime_llm,
+    set_runtime_ai_provider,
+    set_runtime_ollama,
+)
+
+def _current_provider() -> str:
+    return get_effective_ai_provider() or _current_ai_provider
+
+_current_ai_provider = "auto"
+
 
 async def _check_ollama_available() -> tuple[bool, str]:
-    """Check if Ollama is available."""
-    from jarvis.config import get_settings
-    settings = get_settings()
-
+    """Check if Ollama is running and the configured model exists."""
     try:
         from jarvis.llm.providers.ollama import OllamaClient
-        client = OllamaClient(host=settings.ollama_host)
-        is_available = await client.is_available()
-        if is_available:
-            return True, f"Local LLM via Ollama ({settings.ollama_model})"
-        else:
+
+        host = get_effective_ollama_host()
+        model = get_effective_ollama_model()
+        client = OllamaClient(host=host, model=model)
+        if not await client.is_available():
             return False, "Ollama not running. Start with: ollama serve"
+        models = await client.list_models()
+        names = {m.split(":")[0] for m in models}
+        base = model.split(":")[0]
+        if models and base not in names and not any(m.startswith(model) for m in models):
+            return (
+                False,
+                f"Model '{model}' not pulled. Run: ollama pull {model}",
+            )
+        return True, f"Ollama OK — model: {model}"
     except Exception as e:
         return False, f"Ollama error: {str(e)}"
 
 
 async def _check_copilot_available() -> tuple[bool, str]:
-    """Check if GitHub Copilot is available (VS Code or CLI)."""
-    # Try VS Code Copilot first (more reliable if user has VS Code setup)
+    """Check if GitHub Copilot is available (token API, VS Code, or CLI)."""
+    from jarvis.auth.github_token_store import get_stored_github_token
+
+    token = get_stored_github_token()
+    if token:
+        try:
+            from jarvis.llm.providers.copilot_api import get_copilot_api
+
+            api = get_copilot_api()
+            api.set_token(token)
+            ok, msg = await api.check_available()
+            if ok:
+                return True, f"Copilot API ({msg})"
+        except Exception as e:
+            logger.debug("Copilot API check failed: %s", e)
+
     try:
         from jarvis.llm.providers.vscode_copilot import get_vscode_copilot
         vscode_provider = get_vscode_copilot()
@@ -577,16 +611,17 @@ async def _check_copilot_available() -> tuple[bool, str]:
     except Exception as e:
         logger.debug(f"VS Code Copilot check failed: {e}")
 
-    # Fallback to CLI method
     try:
         from jarvis.llm.providers.copilot_cli import get_copilot_cli
         cli_provider = get_copilot_cli()
         cli_available, cli_message = await cli_provider.check_available()
         if cli_available:
             return True, f"CLI Copilot: {cli_message}"
-        else:
-            # Return helpful message for setup
-            return False, "GitHub Copilot not available. Install GitHub Copilot extension in VS Code, or fix GitHub CLI authentication."
+        return (
+            False,
+            cli_message
+            or "Add GitHub token in Settings, run `gh auth login`, or use OpenAI/Ollama.",
+        )
     except Exception as e:
         return False, f"Copilot error: {str(e)}"
 
@@ -623,17 +658,17 @@ async def get_ai_providers():
         "ollama": AIProviderStatus(
             available=ollama_available,
             message=ollama_message,
-            selected=_current_ai_provider == "ollama"
+            selected=_current_provider() in ("ollama", "auto")
         ),
         "copilot": AIProviderStatus(
             available=copilot_available,
             message=copilot_message,
-            selected=_current_ai_provider == "copilot"
+            selected=_current_provider() in ("copilot", "auto")
         ),
         "openai": AIProviderStatus(
             available=openai_available,
             message=openai_message,
-            selected=_current_ai_provider == "openai"
+            selected=_current_provider() in ("openai", "auto")
         ),
         "cursor": AIProviderStatus(
             available=False,
@@ -642,8 +677,9 @@ async def get_ai_providers():
         )
     }
 
+    cur = _current_provider()
     return AIProvidersResponse(
-        current=_current_ai_provider,
+        current=cur,
         providers=providers
     )
 
@@ -653,11 +689,35 @@ async def set_ai_provider(request: SetProviderRequest):
     """Set the current AI provider."""
     global _current_ai_provider
 
-    valid_providers = ["ollama", "copilot", "openai", "cursor"]
+    valid_providers = ["auto", "ollama", "copilot", "openai", "cursor"]
     if request.provider not in valid_providers:
         return {"success": False, "provider": request.provider, "message": f"Invalid provider. Choose from: {valid_providers}"}
 
+    if request.provider == "auto":
+        _current_ai_provider = "auto"
+        set_runtime_ai_provider("auto")
+        return {
+            "success": True,
+            "provider": "auto",
+            "message": "Auto mode: tries GitHub/OpenAI first, then Ollama (small model).",
+        }
+
+    checks = {
+        "ollama": _check_ollama_available,
+        "copilot": _check_copilot_available,
+        "openai": _check_openai_available,
+    }
+    if request.provider in checks:
+        ok, msg = await checks[request.provider]()
+        if not ok:
+            return {
+                "success": False,
+                "provider": request.provider,
+                "message": msg,
+            }
+
     _current_ai_provider = request.provider
+    set_runtime_ai_provider(request.provider)
     return {"success": True, "provider": request.provider, "message": f"AI provider set to {request.provider}"}
 
 
@@ -723,10 +783,31 @@ async def get_copilot_status():
         from jarvis.llm.providers.copilot_cli import get_copilot_cli
         provider = get_copilot_cli()
 
-        # Check authentication
-        auth_ok, auth_message = await provider.check_github_auth()
+        token = get_stored_github_token()
+        if token:
+            from jarvis.llm.providers.copilot_api import get_copilot_api
 
-        # Check Copilot access
+            api = get_copilot_api()
+            api.set_token(token)
+            api_ok, api_msg = await api.check_available()
+            return {
+                "authentication": {
+                    "status": "authenticated" if api_ok else "token_invalid",
+                    "message": api_msg,
+                },
+                "copilot": {
+                    "status": "available" if api_ok else "unavailable",
+                    "message": "Copilot API via Settings token",
+                },
+                "model": {
+                    "current": provider.get_current_model(),
+                    "available_count": len(
+                        [m for models in provider.get_available_models().values() for m in models]
+                    ),
+                },
+            }
+
+        auth_ok, auth_message = await provider.check_github_auth()
         copilot_ok, copilot_message = await provider.check_copilot_access()
 
         return {
@@ -753,187 +834,103 @@ async def get_copilot_status():
 
 @router.post("/project/ai/ask", response_model=AIResponse)
 async def ask_ai(request: AIAskRequest):
-    """Ask AI for help using the selected provider."""
-    from jarvis.config import get_settings
-    from jarvis.core.exceptions import LLMConnectionError, LLMResponseError
-
-    settings = get_settings()
-
-    # Build prompt with context
-    full_prompt = request.prompt
-    if request.code_context:
-        full_prompt = f"Code context from {request.file_path or 'unknown file'} ({request.language or 'unknown language'}):\n\n```\n{request.code_context}\n```\n\nQuestion: {request.prompt}"
+    """Ask AI for help using the selected provider with automatic fallback."""
+    from jarvis.llm.ai_service import generate_chat
 
     system_prompt = "You are a helpful AI coding assistant. Provide clear, concise answers."
+    if request.file_path:
+        system_prompt += f" The user is editing: {request.file_path}."
 
-    # Use the selected provider
-    if _current_ai_provider == "copilot":
-        # Try VS Code Copilot first, then fallback to CLI
+    status, text, _tried = await generate_chat(
+        request.prompt,
+        system=system_prompt,
+        code_context=request.code_context,
+        preferred_provider=_current_provider(),
+    )
+    if status == "success":
+        return AIResponse(status="success", response=text)
+    return AIResponse(status="error", response="", error=text)
 
-        # Method 1: VS Code Copilot (preferred - works with existing VS Code setup)
-        try:
-            from jarvis.llm.providers.vscode_copilot import get_vscode_copilot
-            vscode_provider = get_vscode_copilot()
-            vscode_available, vscode_message = await vscode_provider.check_available()
 
-            if vscode_available:
-                response = await vscode_provider.chat(
-                    prompt=full_prompt,
-                    context=request.code_context,
-                    system_prompt=system_prompt
-                )
+class OllamaConfigRequest(BaseModel):
+    host: Optional[str] = None
+    model: Optional[str] = None
+    pull: bool = False
 
-                if not response.startswith("Error:"):
-                    return AIResponse(
-                        status="success",
-                        response=response
-                    )
-        except Exception as e:
-            logger.debug(f"VS Code Copilot failed: {e}")
 
-        # Method 2: GitHub CLI Copilot (fallback)
-        try:
-            from jarvis.llm.providers.copilot_cli import get_copilot_cli
-            cli_provider = get_copilot_cli()
+@router.get("/project/ai/ollama-config")
+async def get_ollama_config():
+    """Current Ollama host/model (runtime; no server restart)."""
+    return {
+        "host": get_effective_ollama_host(),
+        "model": get_effective_ollama_model(),
+        "runtime": get_runtime_llm(),
+        "default_small_model": DEFAULT_OLLAMA_MODEL,
+    }
 
-            # Check if available
-            cli_available, cli_message = await cli_provider.check_available()
-            if cli_available:
-                response = await cli_provider.chat(
-                    prompt=full_prompt,
-                    context=request.code_context,
-                    system_prompt=system_prompt
-                )
 
-                if not response.startswith("Error:"):
-                    return AIResponse(
-                        status="success",
-                        response=response
-                    )
-                else:
-                    return AIResponse(
-                        status="error",
-                        response="",
-                        error=response
-                    )
-            else:
-                return AIResponse(
-                    status="error",
-                    response="",
-                    error=f"GitHub Copilot not available: {cli_message}"
-                )
-        except Exception as e:
-            return AIResponse(status="error", response="", error=f"Copilot CLI error: {str(e)}")
+@router.post("/project/ai/ollama-config")
+async def post_ollama_config(body: OllamaConfigRequest):
+    """Set Ollama host/model; optionally `ollama pull` on the API machine."""
+    model = (body.model or get_effective_ollama_model()).strip()
+    host = (body.host or get_effective_ollama_host()).strip()
+    set_runtime_ollama(host=host, model=model)
 
-        # If both methods failed
-        return AIResponse(
-            status="error",
-            response="",
-            error="GitHub Copilot not available. Please install GitHub Copilot extension in VS Code or authenticate with GitHub CLI."
-        )
+    pull_msg = ""
+    if body.pull and model:
+        result = await run_command(f"ollama pull {model}", timeout=600)
+        if result.status == "success":
+            pull_msg = f" Pulled {model}."
+        else:
+            pull_msg = f" Pull failed: {result.stderr or result.message or 'unknown'}"
 
-    elif _current_ai_provider == "openai":
-        if not settings.openai_api_key:
-            return AIResponse(
-                status="error",
-                response="",
-                error="OpenAI API key not configured. Set JARVIS_OPENAI_API_KEY in environment."
-            )
+    ok, msg = await _check_ollama_available()
+    return {
+        "success": ok,
+        "host": host,
+        "model": model,
+        "message": (msg or "Ollama configured.") + pull_msg,
+    }
 
-        try:
-            from jarvis.llm.providers.openai import OpenAIClient
 
-            client = OpenAIClient(
-                api_key=settings.openai_api_key,
-                model=settings.openai_model
-            )
+class IDEAgentActionRequest(BaseModel):
+    """Natural-language agent action from IDE (git workflows, etc.)."""
+    intent: str = Field(..., min_length=1, max_length=2000)
+    pairing_code: Optional[str] = None
+    workspace_root: Optional[str] = None
 
-            if not await client.is_available():
-                return AIResponse(
-                    status="error",
-                    response="",
-                    error="OpenAI API not available. Check your API key."
-                )
 
-            response = await client.generate(
-                prompt=full_prompt,
-                system=system_prompt
-            )
+class IDEAgentActionResponse(BaseModel):
+    handled: bool
+    success: bool
+    message: str
+    steps: list[dict[str, Any]] = []
+    summary: Optional[str] = None
 
-            return AIResponse(
-                status="success",
-                response=response
-            )
-        except LLMConnectionError as e:
-            return AIResponse(status="error", response="", error=str(e))
-        except LLMResponseError as e:
-            return AIResponse(status="error", response="", error=str(e))
-        except Exception as e:
-            return AIResponse(status="error", response="", error=f"OpenAI error: {str(e)}")
 
-    else:  # Default to Ollama
-        if not settings.ollama_host:
-            return AIResponse(
-                status="error",
-                response="",
-                error="Ollama not configured. Set JARVIS_OLLAMA_HOST in environment."
-            )
+@router.post("/project/ai/agent-action", response_model=IDEAgentActionResponse)
+async def ide_agent_action(body: IDEAgentActionRequest):
+    """Run deterministic git/shell workflows from natural language (IDE agent mode)."""
+    from jarvis.api.ide_agent_actions import run_agent_action
 
-        try:
-            from jarvis.llm.providers.ollama import OllamaClient
-
-            client = OllamaClient(host=settings.ollama_host)
-
-            if not await client.is_available():
-                return AIResponse(
-                    status="error",
-                    response="",
-                    error=(
-                        "Cannot connect to Ollama. Please ensure Ollama is running:\n"
-                        "1. Open a terminal and run: ollama serve\n"
-                        "2. Or start Ollama from the system tray\n"
-                        f"3. Expected at: {settings.ollama_host}"
-                    )
-                )
-
-            response = await client.generate(
-                prompt=full_prompt,
-                model=settings.ollama_model,
-                system=system_prompt
-            )
-
-            return AIResponse(
-                status="success",
-                response=response
-            )
-        except LLMConnectionError as e:
-            return AIResponse(status="error", response="", error=str(e))
-        except LLMResponseError as e:
-            return AIResponse(status="error", response="", error=str(e))
-        except Exception as e:
-            error_msg = str(e)
-            if "connection" in error_msg.lower() or "connect" in error_msg.lower():
-                error_msg = (
-                    "Cannot connect to Ollama. Please ensure:\n"
-                    "1. Ollama is installed (https://ollama.ai)\n"
-                    "2. Ollama is running (ollama serve)\n"
-                    "3. The model is downloaded (ollama pull llama3.2)"
-                )
-            elif "500" in error_msg:
-                error_msg = (
-                    f"Ollama server error. The model '{settings.ollama_model}' may not be available.\n"
-                    f"Try: ollama pull {settings.ollama_model}"
-                )
-            return AIResponse(status="error", response="", error=error_msg)
+    result = await run_agent_action(
+        body.intent.strip(),
+        pairing_code=body.pairing_code,
+        workspace_root=body.workspace_root,
+    )
+    return IDEAgentActionResponse(**result)
 
 
 # ═══════════════════════════════════════════════════════════════
 # GitHub Authentication Endpoints
 # ═══════════════════════════════════════════════════════════════
 
-# Store GitHub token in memory (in production, use secure storage)
-_github_token: Optional[str] = None
-_github_username: Optional[str] = None
+from jarvis.auth.github_token_store import (
+    clear_github_token as _clear_token_store,
+    get_stored_github_token,
+    get_stored_github_username,
+    save_github_token,
+)
 
 
 class GitHubAuthStatus(BaseModel):
@@ -1013,12 +1010,22 @@ async def get_github_auth_status():
                 username=username,
                 account_type="user",
                 scopes=scopes,
-                message="Authenticated with GitHub"
+                message="Authenticated with GitHub CLI on this PC",
+                has_token=bool(get_stored_github_token()),
             )
         else:
+            tok = get_stored_github_token()
+            if tok:
+                return GitHubAuthStatus(
+                    authenticated=True,
+                    username=get_stored_github_username(),
+                    message="Using GitHub token from Settings (no gh CLI session)",
+                    has_token=True,
+                )
             return GitHubAuthStatus(
                 authenticated=False,
-                message="Not authenticated. Run 'gh auth login' to authenticate."
+                message="Not authenticated. Settings → GitHub token, or run `gh auth login` on the PC.",
+                has_token=False,
             )
     except asyncio.TimeoutError:
         return GitHubAuthStatus(
@@ -1078,11 +1085,7 @@ async def github_login():
 @router.post("/github/auth/logout")
 async def github_logout():
     """Logout from GitHub."""
-    global _github_token, _github_username
-
-    # Clear stored token
-    _github_token = None
-    _github_username = None
+    _clear_token_store()
 
     gh_path = _get_gh_path()
 
@@ -1137,8 +1140,6 @@ async def set_github_token(request: GitHubTokenRequest):
     2. Create a new token (classic) with 'copilot' scope
     3. Copy and paste it here
     """
-    global _github_token, _github_username
-
     token = request.token.strip()
     if not token:
         return GitHubTokenResponse(
@@ -1159,20 +1160,11 @@ async def set_github_token(request: GitHubTokenRequest):
                     data = await resp.json()
                     username = data.get("login", "unknown")
 
-                    # Store the token
-                    _github_token = token
-                    _github_username = username
-
-                    # Also set it in the Copilot API provider
-                    try:
-                        from jarvis.llm.providers.copilot_api import set_copilot_token
-                        set_copilot_token(token)
-                    except ImportError:
-                        pass
+                    save_github_token(token, username)
 
                     return GitHubTokenResponse(
                         success=True,
-                        message=f"Token saved! Authenticated as @{username}",
+                        message=f"Token saved! Authenticated as @{username}. Copilot API enabled.",
                         username=username
                     )
                 elif resp.status == 401:
@@ -1195,29 +1187,25 @@ async def set_github_token(request: GitHubTokenRequest):
 @router.get("/github/token/status", response_model=GitHubTokenResponse)
 async def get_github_token_status():
     """Check if a GitHub token is configured."""
-    global _github_token, _github_username
+    token = get_stored_github_token()
+    username = get_stored_github_username()
 
-    if _github_token:
+    if token:
         return GitHubTokenResponse(
             success=True,
-            message=f"Token configured for @{_github_username}",
-            username=_github_username
+            message=f"Token configured for @{username}",
+            username=username
         )
-    else:
-        return GitHubTokenResponse(
-            success=False,
-            message="No token configured. Add your GitHub token in Settings."
-        )
+    return GitHubTokenResponse(
+        success=False,
+        message="No token configured. Settings → GitHub → paste a PAT (read:user + copilot scopes).",
+    )
 
 
 @router.post("/github/token/clear")
 async def clear_github_token():
     """Clear the stored GitHub token."""
-    global _github_token, _github_username
-
-    _github_token = None
-    _github_username = None
-
+    _clear_token_store()
     return {"success": True, "message": "Token cleared"}
 
 
@@ -1347,50 +1335,34 @@ Please modify it to: {request.instruction}
 
 Return ONLY the complete modified code, no explanations."""
 
-    # Try GitHub Copilot CLI first
-    safe_prompt = prompt.replace('"', '\\"').replace('\n', ' ')[:2000]
-    result = await run_command(f'gh copilot suggest "{safe_prompt}"', timeout=60)
+    from jarvis.llm.ai_service import generate_chat
+
+    status, response, _ = await generate_chat(
+        request.instruction,
+        system=(
+            "You are a code editor. Return ONLY the complete modified file content. "
+            "No markdown fences, no explanations."
+        ),
+        code_context=original_content,
+        preferred_provider=_current_provider(),
+    )
 
     suggested_content = ""
-    if result.status == "success" and result.stdout:
-        # Extract code from response
-        suggested_content = result.stdout
-        # Try to extract code block if present
-        if "```" in suggested_content:
+    if status == "success":
+        suggested_content = response.strip()
+        if suggested_content.startswith("```"):
             import re
             code_blocks = re.findall(r'```(?:\w+)?\n?(.*?)```', suggested_content, re.DOTALL)
             if code_blocks:
                 suggested_content = code_blocks[0].strip()
     else:
-        # Fall back to Ollama
-        from jarvis.config import get_settings
-        settings = get_settings()
-
-        try:
-            from jarvis.llm.providers.ollama import OllamaClient
-            client = OllamaClient(host=settings.ollama_host)
-
-            response = await client.generate(
-                prompt=prompt,
-                model=settings.ollama_model,
-                system="You are a code editor. Return ONLY the modified code, no explanations or markdown."
-            )
-            suggested_content = response.strip()
-
-            # Try to extract code block if wrapped
-            if suggested_content.startswith("```"):
-                import re
-                code_blocks = re.findall(r'```(?:\w+)?\n?(.*?)```', suggested_content, re.DOTALL)
-                if code_blocks:
-                    suggested_content = code_blocks[0].strip()
-        except Exception as e:
-            return CopilotEditResponse(
-                success=False,
-                original_content=original_content,
-                suggested_content="",
-                diff="",
-                message=f"AI error: {e}"
-            )
+        return CopilotEditResponse(
+            success=False,
+            original_content=original_content,
+            suggested_content="",
+            diff="",
+            message=response or "AI unavailable",
+        )
 
     if not suggested_content:
         return CopilotEditResponse(

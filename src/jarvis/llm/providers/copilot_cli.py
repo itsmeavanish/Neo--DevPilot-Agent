@@ -153,43 +153,51 @@ class CopilotCLIProvider:
             return self._auth_status
 
         success, output = await self._run_command(["gh", "auth", "status"])
+        combined = (output or "").lower()
 
-        if success and "✓ Logged in" in output:
-            # Extract username
-            lines = output.split('\n')
+        if success or "logged in" in combined or "account" in combined:
             username = "unknown"
-            for line in lines:
-                if "account:" in line and "(" in line:
-                    username = line.split('account:')[1].split('(')[0].strip()
-                    break
-
+            for line in (output or "").split("\n"):
+                low = line.lower()
+                if "account" in low:
+                    # account USER (github.com) or account: USER
+                    part = line.split("account", 1)[-1].strip(" :")
+                    if part:
+                        username = part.split()[0].strip()
+                        break
             self._auth_status = (True, f"Authenticated as @{username}")
             return self._auth_status
-        else:
-            self._auth_status = (False, "Not authenticated with GitHub CLI")
-            return self._auth_status
+
+        self._auth_status = (
+            False,
+            "Not authenticated. On the PC run: gh auth login -h github.com",
+        )
+        return self._auth_status
 
     async def check_copilot_access(self) -> tuple[bool, str]:
         """Check if Copilot CLI access is available."""
-        # First check GitHub auth
+        from jarvis.auth.github_token_store import get_stored_github_token
+
+        if get_stored_github_token():
+            return True, "GitHub token configured (Copilot API)"
+
         auth_ok, auth_msg = await self.check_github_auth()
         if not auth_ok:
             return False, f"GitHub authentication required: {auth_msg}"
 
-        # Test Copilot access with a simple command
-        success, output = await self._run_command([
-            "gh", "copilot", "--",
-            "--prompt", "test",
-            "--silent",
-            "--allow-all-tools"
-        ], timeout=30)
-
+        success, output = await self._run_command(["gh", "copilot", "--version"], timeout=20)
         if success:
-            return True, f"Copilot CLI ready ({auth_msg})"
-        elif "subscription" in output.lower() or "copilot" in output.lower():
-            return False, "Copilot subscription required. Please ensure you have GitHub Copilot access."
-        else:
-            return False, f"Copilot CLI error: {output}"
+            return True, f"Copilot CLI installed ({auth_msg})"
+
+        low = (output or "").lower()
+        if "subscription" in low or "not a copilot" in low:
+            return (
+                False,
+                "GitHub Copilot subscription required, or add a GitHub PAT in Settings → GitHub token.",
+            )
+        if "not found" in low or "unknown command" in low:
+            return False, "Install GitHub CLI Copilot: gh extension install github/gh-copilot"
+        return False, f"Copilot CLI: {output or 'unavailable'}"
 
     async def check_available(self) -> tuple[bool, str]:
         """Check if Copilot CLI is available and accessible."""
