@@ -59,14 +59,13 @@ export default function ChatScreen() {
       role: 'assistant',
       content:
         "Hello! I'm JARVIS — your DevPilot automation assistant.\n\n" +
-        '• !command — run shell commands\n' +
-        '• git ... — run git commands\n' +
-        '• /vscode [path] — launch VS Code & open IDE\n' +
-        '• /ai prompt — ask AI assistant (single-shot)\n' +
-        '• /chat message — full conversational AI with memory\n' +
-        '• /review — AI code-review of the loaded file\n' +
-        '• /file path — load file as context\n\n' +
-        'What would you like to do?',
+        '• Type normally to chat with AI (e.g. "Hello")\n' +
+        '• !command — run shell on paired laptop\n' +
+        '• git status — git on paired laptop\n' +
+        '• /vscode [path] — launch VS Code & open IDE tab\n' +
+        '• /file path — load file as context\n' +
+        '• IDE tab → Agent mode — "add, commit and push to main"\n\n' +
+        'Configure AI in Settings (GitHub token, OpenAI, or Ollama).',
       timestamp: new Date(),
     },
   ]);
@@ -255,10 +254,19 @@ export default function ChatScreen() {
           addMessage('assistant', `Copilot CLI:\n\n${output}`, res.status !== 'success');
         }
       } else {
-        // Default: treat as system command
-        const res = await runSystemCommand(text);
-        const output = res.stdout || res.stderr || res.message || 'No output';
-        addMessage('assistant', `$ ${text}\n\n${output}`, res.status !== 'success');
+        // Natural language → AI (Ollama / Copilot token / OpenAI with auto-fallback)
+        const res = await askAI(
+          text,
+          fileContext?.content,
+          fileContext?.path,
+          fileContext?.language
+        );
+        if (res.error) {
+          addMessage('assistant', res.error, true);
+        } else {
+          const providerLabel = currentProvider ? `[${currentProvider}] ` : '';
+          addMessage('assistant', `${providerLabel}${res.response}`);
+        }
       }
     } catch (err) {
       addMessage('assistant', `Error: ${err instanceof Error ? err.message : 'Connection failed. Is the backend running?'}`, true);

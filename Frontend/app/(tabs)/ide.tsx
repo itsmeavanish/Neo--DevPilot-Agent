@@ -27,9 +27,12 @@ import {
   copilotEdit,
   askAI,
   getCurrentWorkingDirectory,
+  getAIProviders,
+  runIDEAgentAction,
   FileInfo,
   CopilotEditResponse,
 } from '@/lib/api';
+import configManager from '@/lib/config';
 
 // VS Code Dark Theme Colors
 const VSColors = {
@@ -99,11 +102,22 @@ export default function IDEScreen() {
 
   // Copilot Chat state
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
-    { id: '1', role: 'assistant', content: 'Hi! I can help you with code questions, explanations, and editing. To edit code, use keywords like "edit", "change", or "fix" with an open file.' },
+    {
+      id: '1',
+      role: 'assistant',
+      content:
+        'AI assistant ready.\n\n' +
+        '• Chat: ask anything (works without a file open)\n' +
+        '• Agent mode: "add, commit and push to main" runs git on your paired laptop\n' +
+        '• Code edit: open a file, then say "edit …" or "fix …"\n\n' +
+        'Configure AI in Settings (GitHub token, OpenAI, or Ollama).',
+    },
   ]);
   const [chatInput, setChatInput] = useState('');
   const [loadingChat, setLoadingChat] = useState(false);
   const [pendingEdit, setPendingEdit] = useState<CopilotEditResponse | null>(null);
+  const [agentMode, setAgentMode] = useState(true);
+  const [aiProviderLabel, setAiProviderLabel] = useState('');
 
   // UI state - responsive
   const [sidebarCollapsed, setSidebarCollapsed] = useState(isMobile);
@@ -117,6 +131,23 @@ export default function IDEScreen() {
 
   const terminalScrollRef = useRef<ScrollView>(null);
   const chatScrollRef = useRef<ScrollView>(null);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        await configManager.init();
+        const p = await getAIProviders();
+        const cur = p.providers?.[p.current];
+        setAiProviderLabel(
+          cur?.available
+            ? `${p.current} ✓`
+            : `${p.current} (fallback)`
+        );
+      } catch {
+        setAiProviderLabel('');
+      }
+    })();
+  }, []);
 
   // Initialize current path dynamically
   useEffect(() => {
@@ -292,7 +323,7 @@ export default function IDEScreen() {
     }
   };
 
-  // Send Copilot message
+  // Send Copilot / Agent message
   const sendCopilotMessage = async () => {
     if (!chatInput.trim() || loadingChat) return;
 
@@ -307,8 +338,38 @@ export default function IDEScreen() {
     setLoadingChat(true);
 
     try {
-      // Determine if this is a code edit request or general chat
-      const isEditRequest = /\b(edit|change|modify|update|fix|refactor|rewrite)\b/i.test(currentInput) && activeTab;
+      if (agentMode) {
+        await configManager.init();
+        if (!configManager.pairingCode) {
+          setChatMessages(prev => [
+            ...prev,
+            {
+              id: (Date.now() + 1).toString(),
+              role: 'assistant',
+              content:
+                'Agent mode needs a paired laptop. Open Settings, enter your pairing code, and keep the PC agent running.',
+              isError: true,
+            },
+          ]);
+          return;
+        }
+        const agentResult = await runIDEAgentAction(currentInput, currentPath);
+        if (agentResult.handled) {
+          setChatMessages(prev => [
+            ...prev,
+            {
+              id: (Date.now() + 1).toString(),
+              role: 'assistant',
+              content: agentResult.message,
+              isError: !agentResult.success,
+            },
+          ]);
+          return;
+        }
+      }
+
+      const isEditRequest =
+        /\b(edit|change|modify|update|fix|refactor|rewrite)\b/i.test(currentInput) && activeTab;
 
       if (isEditRequest && activeTab) {
         // Use Copilot editing for code modifications
@@ -641,7 +702,16 @@ export default function IDEScreen() {
         ]}>
           <View style={styles.copilotHeader}>
             <Ionicons name="sparkles" size={16} color={VSColors.accent} />
-            <Text style={styles.copilotTitle}>COPILOT</Text>
+            <Text style={styles.copilotTitle}>{agentMode ? 'AI AGENT' : 'AI CHAT'}</Text>
+            {aiProviderLabel ? (
+              <Text style={styles.providerBadge}>{aiProviderLabel}</Text>
+            ) : null}
+            <TouchableOpacity
+              style={[styles.agentToggle, agentMode && styles.agentToggleOn]}
+              onPress={() => setAgentMode((v) => !v)}
+            >
+              <Text style={styles.agentToggleText}>{agentMode ? 'Agent' : 'Chat'}</Text>
+            </TouchableOpacity>
             <View style={{ flex: 1 }} />
             {isMobile && (
               <TouchableOpacity onPress={() => setActiveBottomPanel(null)} style={styles.panelCloseBtn}>
@@ -680,20 +750,25 @@ export default function IDEScreen() {
               style={[styles.chatInput, isMobile && styles.chatInputMobile]}
               value={chatInput}
               onChangeText={setChatInput}
-              placeholder={activeTab ? "Ask questions or request code edits..." : "Ask AI questions (open a file to edit code)..."}
+              placeholder={
+                agentMode
+                  ? 'e.g. add, commit and push to main'
+                  : activeTab
+                    ? 'Ask or request code edits…'
+                    : 'Ask AI (open a file to edit code)…'
+              }
               placeholderTextColor={VSColors.textMuted}
               multiline
               maxLength={500}
-              editable={!!activeTab}
               onSubmitEditing={sendCopilotMessage}
               blurOnSubmit={false}
             />
             <TouchableOpacity
-              style={[styles.sendBtn, (!chatInput.trim() || loadingChat || !activeTab) && styles.sendBtnDisabled]}
+              style={[styles.sendBtn, (!chatInput.trim() || loadingChat) && styles.sendBtnDisabled]}
               onPress={sendCopilotMessage}
-              disabled={loadingChat || !chatInput.trim() || !activeTab}
+              disabled={loadingChat || !chatInput.trim()}
             >
-              <Ionicons name="send" size={20} color={loadingChat || !chatInput.trim() || !activeTab ? VSColors.textMuted : VSColors.white} />
+              <Ionicons name="send" size={20} color={loadingChat || !chatInput.trim() ? VSColors.textMuted : VSColors.white} />
             </TouchableOpacity>
           </View>
         </View>
@@ -1027,6 +1102,29 @@ const styles = StyleSheet.create({
     color: VSColors.textMuted,
     letterSpacing: 0.5,
     marginLeft: 6,
+    marginRight: 6,
+  },
+  providerBadge: {
+    fontSize: 10,
+    color: VSColors.success,
+    marginRight: 6,
+  },
+  agentToggle: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: VSColors.border,
+    backgroundColor: VSColors.inputBg,
+  },
+  agentToggleOn: {
+    borderColor: VSColors.accent,
+    backgroundColor: VSColors.accent + '33',
+  },
+  agentToggleText: {
+    fontSize: 10,
+    color: VSColors.text,
+    fontWeight: '600',
   },
   chatMessages: {
     flex: 1,

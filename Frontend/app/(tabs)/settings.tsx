@@ -59,7 +59,7 @@ export default function SettingsScreen() {
   const [githubTokenInput, setGithubTokenInput] = useState('');
   const [openaiKeyInput, setOpenaiKeyInput] = useState('');
   const [ollamaHostInput, setOllamaHostInput] = useState('http://localhost:11434');
-  const [ollamaModelInput, setOllamaModelInput] = useState('llama3.2');
+  const [ollamaModelInput, setOllamaModelInput] = useState('llama3.2:1b');
 
   useEffect(() => {
     loadStatus();
@@ -196,10 +196,15 @@ export default function SettingsScreen() {
 
   const handleOllamaConfig = async () => {
     try {
-      const result = await setOllamaConfig(ollamaHostInput.trim(), ollamaModelInput.trim());
+      const result = await setOllamaConfig(
+        ollamaHostInput.trim(),
+        ollamaModelInput.trim() || 'llama3.2:1b',
+        true
+      );
       if (result.success) {
         setShowOllamaModal(false);
         await loadAIStatus();
+        await handleProviderChange('auto');
         Alert.alert('Success', result.message);
       } else {
         Alert.alert('Error', result.message);
@@ -350,10 +355,20 @@ export default function SettingsScreen() {
                 }]} />
               </View>
               <Text style={styles.providerStatus}>
-                {copilotStatus?.copilot?.message || 'Checking status...'}
-                {copilotStatus?.model?.current && `\nModel: ${copilotStatus.model.current}`}
+                {githubTokenStatus?.success
+                  ? `Token: ${githubTokenStatus.message}`
+                  : copilotStatus?.authentication?.message || 'Not linked'}
+                {'\n'}
+                {copilotStatus?.copilot?.message || 'Checking Copilot…'}
+                {copilotStatus?.model?.current ? `\nModel: ${copilotStatus.model.current}` : ''}
               </Text>
               <View style={styles.providerActions}>
+                <TouchableOpacity
+                  style={styles.configButton}
+                  onPress={() => setShowGitHubTokenModal(true)}
+                >
+                  <Ionicons name="key-outline" size={16} color={Colors.primary} />
+                </TouchableOpacity>
                 <TouchableOpacity
                   style={[styles.providerButton, aiProviders.current === 'copilot' && styles.activeProvider]}
                   onPress={() => handleProviderChange('copilot')}
@@ -499,7 +514,9 @@ export default function SettingsScreen() {
               </TouchableOpacity>
             </View>
             <Text style={styles.modalDescription}>
-              Enter your GitHub Personal Access Token to enable Copilot API access from cloud deployment.
+              Paste a GitHub Personal Access Token (classic) with Copilot access. This fixes
+              "Copilot subscription required" when gh CLI is not logged in on the PC. Create at
+              github.com/settings/tokens — enable Copilot scope if available.
             </Text>
             <TextInput
               style={styles.modalInput}

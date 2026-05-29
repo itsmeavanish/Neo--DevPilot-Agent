@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     # LLM Settings
     llm_provider: str = Field(default="ollama", description="LLM provider: ollama, copilot, openai")
     ollama_host: str = Field(default="http://localhost:11434", description="Ollama server URL")
-    ollama_model: str = Field(default="llama3.2", description="Default Ollama model")
+    ollama_model: str = Field(default="llama3.2:1b", description="Default Ollama model (use :1b for low RAM)")
     embedding_model: str = Field(default="nomic-embed-text", description="Embedding model")
 
     # Copilot Settings
