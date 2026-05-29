@@ -47,7 +47,7 @@ class AgentLoop:
     2. ORIENT: Retrieve relevant memories, assess situation
     3. DECIDE: Create execution plan via LLM
     4. ACT: Execute plan steps, handle errors
-    5. LEARN: Update memory with outcomes (TODO: Phase 2)
+    5. LEARN: Update memory with outcomes
 
     Usage:
         agent = AgentLoop()

@@ -121,8 +121,9 @@ def create_llm_client(
         return OpenAIClient(**kwargs)
 
     elif provider == "anthropic":
-        # TODO: Implement Anthropic client
-        raise NotImplementedError("Anthropic client not yet implemented")
+        from jarvis.llm.providers.anthropic import AnthropicClient
+        return AnthropicClient(**kwargs)
+
 
     else:
         raise ValueError(f"Unknown LLM provider: {provider}")
