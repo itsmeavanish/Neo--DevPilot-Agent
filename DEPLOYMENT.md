@@ -100,5 +100,6 @@ eas build --platform android --profile preview --local
 | Variable | Description |
 |----------|-------------|
 | `JARVIS_API_KEY` | API authentication key |
-| `JARVIS_LLM_PROVIDER` | `ollama`, `openai`, or `copilot` |
+| `JARVIS_LLM_PROVIDER` | `ollama`, `openai`, `copilot`, or `gemini` |
 | `OPENAI_API_KEY` | OpenAI API key (if using) |
+| `JARVIS_GEMINI_API_KEY` | Google Gemini API key (if using) |

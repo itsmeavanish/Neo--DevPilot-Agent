@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     debug: bool = Field(default=False, description="Debug mode")
 
     # LLM Settings
-    llm_provider: str = Field(default="ollama", description="LLM provider: ollama, copilot, openai")
+    llm_provider: str = Field(default="ollama", description="LLM provider: ollama, copilot, openai, gemini")
     ollama_host: str = Field(default="http://localhost:11434", description="Ollama server URL")
     ollama_model: str = Field(default="llama3.2", description="Default Ollama model")
     embedding_model: str = Field(default="nomic-embed-text", description="Embedding model")
@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     # OpenAI Settings (for cloud deployment)
     openai_api_key: str = Field(default="", description="OpenAI API key")
     openai_model: str = Field(default="gpt-4o-mini", description="OpenAI model to use")
+
+    # Gemini Settings
+    gemini_api_key: str = Field(default="", description="Gemini API key")
+    gemini_model: str = Field(default="gemini-2.5-flash", description="Gemini model to use")
 
     # Database Settings (Phase 2)
     database_url: str | None = Field(
