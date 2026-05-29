@@ -15,6 +15,7 @@ psutil>=5.9.0
 
 # Development
 python-dotenv>=1.0.0
+cryptography>=42.0.0
 
 # ═══════════════════════════════════════════════════
 # Phase 2: Memory + RAG

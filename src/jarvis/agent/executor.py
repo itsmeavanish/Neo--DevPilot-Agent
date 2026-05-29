@@ -14,6 +14,7 @@ from jarvis.tools.base import BaseTool, ToolResult
 from jarvis.tools.registry import ToolRegistry
 from jarvis.core.constants import RiskLevel, OnError, StepStatus, MAX_RETRY_ATTEMPTS
 from jarvis.core.logging import get_logger
+from jarvis.self_heal.engine import get_self_heal_engine
 from jarvis.core.exceptions import (
     ToolNotFoundError,
     ToolExecutionError,
@@ -243,9 +244,30 @@ class Executor:
                     self.logger.warning(f"Step failed after retries, aborting: {step.tool_name}")
                     break
                 elif step.on_error == OnError.SELF_HEAL:
-                    # TODO: Implement self-healing
-                    self.logger.warning(f"Self-heal not implemented, aborting: {step.tool_name}")
-                    break
+                    self.logger.info(f"Triggering self-healing for step failure: {step.tool_name}")
+                    try:
+                        resolutions = await get_self_heal_engine().auto_resolve()
+                        if any(r.success for r in resolutions):
+                            self.logger.info(f"Self-healing successful. Retrying step: {step.tool_name}")
+                            # Reset step status for retry
+                            step.status = StepStatus.PENDING
+                            step.error = None
+                            retry_result = await self.execute_step(step, context)
+
+                            # Replace the failed result with the retry result
+                            results[-1] = retry_result
+
+                            if retry_result.is_success:
+                                continue
+                            else:
+                                self.logger.warning(f"Step failed again after self-healing, aborting: {step.tool_name}")
+                                break
+                        else:
+                            self.logger.warning(f"Self-healing failed to resolve the issue, aborting: {step.tool_name}")
+                            break
+                    except Exception as e:
+                        self.logger.exception(f"Self-healing execution failed: {e}")
+                        break
 
         return results
 
