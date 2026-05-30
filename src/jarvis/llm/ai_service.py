@@ -181,7 +181,31 @@ def _has_openai() -> bool:
     return bool((get_settings().openai_api_key or "").strip())
 
 
-def _provider_chain(preferred: str, has_github_token: bool, has_openai: bool) -> list[str]:
+async def _try_gemini(prompt: str, system: str) -> tuple[bool, str]:
+    from jarvis.config import get_settings
+
+    settings = get_settings()
+    if not getattr(settings, "gemini_api_key", None):
+        return False, "Gemini API key not configured"
+    try:
+        from jarvis.llm.providers.gemini import GeminiClient
+
+        client = GeminiClient(api_key=settings.gemini_api_key, model=settings.gemini_model)
+        if not await client.is_available():
+            return False, "Gemini API key invalid or expired"
+        text = await client.generate(prompt=prompt, system=system)
+        return True, text
+    except Exception as e:
+        return False, str(e)
+
+
+def _has_gemini() -> bool:
+    from jarvis.config import get_settings
+
+    return bool((getattr(get_settings(), "gemini_api_key", "") or "").strip())
+
+
+def _provider_chain(preferred: str, has_github_token: bool, has_openai: bool, has_gemini: bool) -> list[str]:
     """
     Build provider try-order. Cloud/token providers run before Ollama so OOM does not block chat.
     """
@@ -192,12 +216,16 @@ def _provider_chain(preferred: str, has_github_token: bool, has_openai: bool) ->
         cloud_first.append("copilot_api")
     if has_openai:
         cloud_first.append("openai")
+    if has_gemini:
+        cloud_first.append("gemini")
     cloud_first.extend(["copilot_cli", "vscode_copilot"])
 
     if preferred == "openai" and has_openai:
         chain = ["openai", *cloud_first, "ollama"]
+    elif preferred == "gemini" and has_gemini:
+        chain = ["gemini", *cloud_first, "ollama"]
     elif preferred == "copilot":
-        chain = ["copilot_api", "copilot_cli", "vscode_copilot", "openai", "ollama"]
+        chain = ["copilot_api", "copilot_cli", "vscode_copilot", "openai", "gemini", "ollama"]
     elif preferred == "ollama":
         # User asked for Ollama but still try cloud first if configured
         chain = [*cloud_first, "ollama"] if cloud_first else ["ollama", *cloud_first]
@@ -233,7 +261,8 @@ async def generate_chat(
 
     has_token = bool(get_stored_github_token())
     has_openai = _has_openai()
-    chain = _provider_chain(preferred_provider, has_token, has_openai)
+    has_gemini = _has_gemini()
+    chain = _provider_chain(preferred_provider, has_token, has_openai, has_gemini)
     errors: list[str] = []
 
     for name in chain:
@@ -246,6 +275,8 @@ async def generate_chat(
                 ok, text = await _try_vscode_copilot(full_prompt, system, code_context)
             elif name == "openai":
                 ok, text = await _try_openai(full_prompt, system)
+            elif name == "gemini":
+                ok, text = await _try_gemini(full_prompt, system)
             elif name == "ollama":
                 ok, text = await _try_ollama_with_fallbacks(full_prompt, system)
             else:
@@ -265,7 +296,8 @@ async def generate_chat(
         "Quick fix (pick one):\n"
         "1. Settings → GitHub → paste Personal Access Token (Copilot)\n"
         "2. Settings → OpenAI → API key\n"
-        "3. On PC: ollama pull llama3.2:1b → Settings → Ollama model llama3.2:1b\n\n"
+        "3. Settings → Gemini → API key\n"
+        "4. On PC: ollama pull llama3.2:1b → Settings → Ollama model llama3.2:1b\n\n"
         "Details:\n" + "\n".join(errors[-5:])
     )
     return "error", hint, errors

@@ -14,6 +14,7 @@ from typing import Any, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from jarvis.devices.agent_registry import get_agent_registry
 from jarvis.core.logging import get_logger
 
 logger = get_logger("jarvis.api.mobile")
@@ -636,7 +637,7 @@ async def _check_openai_available() -> tuple[bool, str]:
 
     try:
         from jarvis.llm.providers.openai import OpenAIClient
-        client = OpenAIClient(api_key=settings.openai_api_key)
+        client = OpenAIClient(api_key=settings.openai_api_key, model=settings.openai_model)
         is_available = await client.is_available()
         if is_available:
             return True, f"OpenAI API ({settings.openai_model})"
@@ -646,6 +647,26 @@ async def _check_openai_available() -> tuple[bool, str]:
         return False, f"OpenAI error: {str(e)}"
 
 
+async def _check_gemini_available() -> tuple[bool, str]:
+    """Check if Gemini API is available."""
+    from jarvis.config import get_settings
+    settings = get_settings()
+
+    if not getattr(settings, "gemini_api_key", None):
+        return False, "Gemini API key not configured"
+
+    try:
+        from jarvis.llm.providers.gemini import GeminiClient
+        client = GeminiClient(api_key=settings.gemini_api_key, model=settings.gemini_model)
+        is_available = await client.is_available()
+        if is_available:
+            return True, f"Gemini API ({settings.gemini_model})"
+        else:
+            return False, "Gemini API key invalid or expired"
+    except Exception as e:
+        return False, f"Gemini error: {str(e)}"
+
+
 @router.get("/project/ai/providers", response_model=AIProvidersResponse)
 async def get_ai_providers():
     """Get available AI providers with real availability checks."""
@@ -653,6 +674,7 @@ async def get_ai_providers():
     ollama_available, ollama_message = await _check_ollama_available()
     copilot_available, copilot_message = await _check_copilot_available()
     openai_available, openai_message = await _check_openai_available()
+    gemini_available, gemini_message = await _check_gemini_available()
 
     providers = {
         "ollama": AIProviderStatus(
@@ -669,6 +691,11 @@ async def get_ai_providers():
             available=openai_available,
             message=openai_message,
             selected=_current_provider() in ("openai", "auto")
+        ),
+        "gemini": AIProviderStatus(
+            available=gemini_available,
+            message=gemini_message,
+            selected=_current_provider() in ("gemini", "auto")
         ),
         "cursor": AIProviderStatus(
             available=False,
@@ -689,7 +716,7 @@ async def set_ai_provider(request: SetProviderRequest):
     """Set the current AI provider."""
     global _current_ai_provider
 
-    valid_providers = ["auto", "ollama", "copilot", "openai", "cursor"]
+    valid_providers = ["auto", "ollama", "copilot", "openai", "gemini", "cursor"]
     if request.provider not in valid_providers:
         return {"success": False, "provider": request.provider, "message": f"Invalid provider. Choose from: {valid_providers}"}
 
@@ -699,13 +726,14 @@ async def set_ai_provider(request: SetProviderRequest):
         return {
             "success": True,
             "provider": "auto",
-            "message": "Auto mode: tries GitHub/OpenAI first, then Ollama (small model).",
+            "message": "Auto mode: tries GitHub/OpenAI/Gemini first, then Ollama (small model).",
         }
 
     checks = {
         "ollama": _check_ollama_available,
         "copilot": _check_copilot_available,
         "openai": _check_openai_available,
+        "gemini": _check_gemini_available,
     }
     if request.provider in checks:
         ok, msg = await checks[request.provider]()
@@ -719,6 +747,40 @@ async def set_ai_provider(request: SetProviderRequest):
     _current_ai_provider = request.provider
     set_runtime_ai_provider(request.provider)
     return {"success": True, "provider": request.provider, "message": f"AI provider set to {request.provider}"}
+
+
+class AIKeysRequest(BaseModel):
+    openai_api_key: Optional[str] = None
+    openai_model: Optional[str] = None
+    gemini_api_key: Optional[str] = None
+    gemini_model: Optional[str] = None
+
+
+@router.post("/project/ai/keys")
+async def save_ai_keys(body: AIKeysRequest):
+    """Save OpenAI and Gemini API keys and models to runtime settings."""
+    from jarvis.runtime_llm import get_runtime_llm, _save
+    from jarvis.config import get_settings
+    
+    runtime = get_runtime_llm()
+    if body.openai_api_key is not None:
+        runtime["openai_api_key"] = body.openai_api_key.strip()
+    if body.openai_model is not None:
+        runtime["openai_model"] = body.openai_model.strip()
+    if body.gemini_api_key is not None:
+        runtime["gemini_api_key"] = body.gemini_api_key.strip()
+    if body.gemini_model is not None:
+        runtime["gemini_model"] = body.gemini_model.strip()
+        
+    _save(runtime)
+    get_settings.cache_clear()
+    
+    return {
+        "success": True,
+        "message": "AI configuration updated on backend server.",
+        "openai_configured": bool(runtime.get("openai_api_key")),
+        "gemini_configured": bool(runtime.get("gemini_api_key")),
+    }
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -972,9 +1034,52 @@ def _get_gh_path() -> str:
 
 @router.get("/github/auth/status", response_model=GitHubAuthStatus)
 async def get_github_auth_status():
-    """Get GitHub authentication status."""
-    gh_path = _get_gh_path()
+    """Get GitHub authentication status (checks backend token and paired agent)."""
+    # 1. If we have a token stored on the backend, check if it's valid
+    token = get_stored_github_token()
+    if token:
+        try:
+            from jarvis.llm.providers.copilot_api import get_copilot_api
+            api = get_copilot_api()
+            api.set_token(token)
+            ok, msg = await api.check_available()
+            if ok:
+                return GitHubAuthStatus(
+                    authenticated=True,
+                    username=get_stored_github_username() or "Copilot User",
+                    message=f"Using GitHub token from Settings ({msg})",
+                    has_token=True,
+                )
+        except Exception as e:
+            logger.debug("GitHub token check failed: %s", e)
 
+    # 2. If no token stored, or it is invalid, check if there is an active paired agent (laptop)
+    reg = get_agent_registry()
+    agents = reg.list_agents()
+    if agents:
+        agent = agents[0]
+        try:
+            # Query laptop agent for its gh token
+            res = await reg.send_command_to_agent(agent.device_id, "gh auth token", timeout=10)
+            if res.get("success") and res.get("stdout"):
+                tok = res["stdout"].strip()
+                if tok:
+                    # Get username too
+                    user_res = await reg.send_command_to_agent(agent.device_id, "gh api user --jq .login", timeout=10)
+                    username = user_res.get("stdout", "").strip() if user_res.get("success") else "Copilot User"
+                    # Save it on the backend
+                    save_github_token(tok, username)
+                    return GitHubAuthStatus(
+                        authenticated=True,
+                        username=username,
+                        message="Authenticated using token synced from paired laptop",
+                        has_token=True,
+                    )
+        except Exception as e:
+            logger.debug("Failed to retrieve gh auth token from laptop: %s", e)
+
+    # 3. Fallback to checking local container CLI (mostly for non-container debugging)
+    gh_path = _get_gh_path()
     try:
         if platform.system() == "Windows":
             cmd = f'cmd.exe /c {gh_path} auth status'
@@ -986,21 +1091,16 @@ async def get_github_auth_status():
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=5)
         output = (stdout.decode() + stderr.decode()).strip()
 
         if process.returncode == 0:
-            # Parse the output to extract username and scopes
             username = None
             scopes = []
-
-            # Look for username pattern: "Logged in to github.com account USERNAME"
             import re
             username_match = re.search(r'account\s+(\S+)', output)
             if username_match:
                 username = username_match.group(1)
-
-            # Look for scopes pattern: "Token scopes: 'scope1', 'scope2'"
             scopes_match = re.search(r"Token scopes:\s*'([^']+)'", output)
             if scopes_match:
                 scopes = [s.strip().strip("'") for s in scopes_match.group(0).replace("Token scopes:", "").split(",")]
@@ -1013,30 +1113,14 @@ async def get_github_auth_status():
                 message="Authenticated with GitHub CLI on this PC",
                 has_token=bool(get_stored_github_token()),
             )
-        else:
-            tok = get_stored_github_token()
-            if tok:
-                return GitHubAuthStatus(
-                    authenticated=True,
-                    username=get_stored_github_username(),
-                    message="Using GitHub token from Settings (no gh CLI session)",
-                    has_token=True,
-                )
-            return GitHubAuthStatus(
-                authenticated=False,
-                message="Not authenticated. Settings → GitHub token, or run `gh auth login` on the PC.",
-                has_token=False,
-            )
-    except asyncio.TimeoutError:
-        return GitHubAuthStatus(
-            authenticated=False,
-            message="Timeout checking GitHub auth status"
-        )
-    except Exception as e:
-        return GitHubAuthStatus(
-            authenticated=False,
-            message=f"GitHub CLI not available: {str(e)}"
-        )
+    except Exception:
+        pass
+
+    return GitHubAuthStatus(
+        authenticated=False,
+        message="Not authenticated. Add token in Settings, or run `gh auth login` on your paired laptop.",
+        has_token=False,
+    )
 
 
 @router.post("/github/auth/login", response_model=GitHubLoginResponse)

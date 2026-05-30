@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -11,13 +11,16 @@ import {
   ScrollView,
   RefreshControl,
   Alert,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { Colors } from '../../lib/theme';
+import { Colors, Spacing, FontSize, BorderRadius } from '../../lib/theme';
 import {
   listDirectory,
   readFile,
   getProjectInfo,
+  runSystemCommand,
   FileInfo,
   FileContent,
   ProjectInfo,
@@ -43,11 +46,63 @@ export default function FilesScreen() {
   const [history, setHistory] = useState<string[]>([]);
   const [workspaceRoot, setWorkspaceRoot] = useState('');
 
+  // Sub tab selection
+  const [activeSubTab, setActiveSubTab] = useState<'files' | 'terminal'>('files');
+
+  // Terminal states
+  const [terminalInput, setTerminalInput] = useState('');
+  const [terminalRunning, setTerminalRunning] = useState(false);
+  const [terminalLines, setTerminalLines] = useState<any[]>([
+    { id: '0', type: 'output', content: 'DevPilot Terminal — Connected.\nType any command to execute on the remote machine.\n' },
+  ]);
+  const [cmdHistory, setCmdHistory] = useState<string[]>([]);
+  const terminalScrollViewRef = useRef<ScrollView>(null);
+
   useEffect(() => {
     void configManager.init().then(() => {
       setWorkspaceRoot(configManager.workspaceRoot);
+      if (configManager.workspaceRoot) {
+        setPathInput(configManager.workspaceRoot);
+        void loadDirectory(configManager.workspaceRoot, false);
+      }
     });
   }, []);
+
+  useEffect(() => {
+    if (activeSubTab === 'terminal') {
+      setTimeout(() => {
+        terminalScrollViewRef.current?.scrollToEnd({ animated: true });
+      }, 50);
+    }
+  }, [terminalLines, activeSubTab]);
+
+  const addTerminalLine = (type: 'input' | 'output' | 'error', content: string) => {
+    setTerminalLines((prev) => [...prev, { id: Date.now().toString() + Math.random(), type, content }]);
+  };
+
+  const handleRunTerminal = async () => {
+    const cmd = terminalInput.trim();
+    if (!cmd || terminalRunning) return;
+    setTerminalInput('');
+    setCmdHistory((prev) => [cmd, ...prev.slice(0, 49)]);
+    addTerminalLine('input', `$ ${cmd}`);
+    setTerminalRunning(true);
+
+    try {
+      const res = await runSystemCommand(cmd);
+      if (res.stdout) addTerminalLine('output', res.stdout.trim());
+      if (res.stderr) addTerminalLine('error', res.stderr.trim());
+      if (!res.stdout && !res.stderr && res.message) {
+        addTerminalLine(res.status === 'success' ? 'output' : 'error', res.message);
+      }
+    } catch (err) {
+      addTerminalLine('error', err instanceof Error ? err.message : 'Connection failed');
+    } finally {
+      setTerminalRunning(false);
+    }
+  };
+
+  const clearTerminal = () => setTerminalLines([]);
 
   const loadDirectory = useCallback(async (path: string, addToHistory = true) => {
     if (!path.trim()) {
@@ -216,140 +271,242 @@ export default function FilesScreen() {
   );
 
   return (
-    <View style={styles.container}>
-      {/* Path input */}
-      <View style={styles.pathContainer}>
-        <View style={styles.pathInputRow}>
-          <TextInput
-            style={styles.pathInput}
-            value={pathInput}
-            onChangeText={setPathInput}
-            placeholder="Enter path (e.g., C:\Projects or ~/code)"
-            placeholderTextColor={Colors.muted}
-            onSubmitEditing={() => loadDirectory(pathInput)}
-            autoCapitalize="none"
-            autoCorrect={false}
-          />
-          <TouchableOpacity
-            style={styles.goButton}
-            onPress={() => loadDirectory(pathInput)}
-          >
-            <Ionicons name="arrow-forward" size={20} color={Colors.foreground} />
-          </TouchableOpacity>
-        </View>
-
-        {/* Current path & navigation */}
-        {currentPath && (
-          <View style={styles.navRow}>
-            <TouchableOpacity
-              style={[styles.navButton, !history.length && styles.navButtonDisabled]}
-              onPress={goBack}
-              disabled={!history.length}
-            >
-              <Ionicons name="arrow-back" size={18} color={history.length ? Colors.foreground : Colors.muted} />
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.navButton} onPress={goToParent}>
-              <Ionicons name="arrow-up" size={18} color={Colors.foreground} />
-            </TouchableOpacity>
-            <Text style={styles.currentPath} numberOfLines={1}>{currentPath}</Text>
-            <TouchableOpacity
-              style={styles.hiddenToggle}
-              onPress={() => {
-                setShowHidden(!showHidden);
-                if (currentPath) loadDirectory(currentPath, false);
-              }}
-            >
-              <Ionicons
-                name={showHidden ? 'eye' : 'eye-off'}
-                size={18}
-                color={showHidden ? Colors.primary : Colors.muted}
-              />
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.projectRootBtn} onPress={() => void setAsProjectRoot()}>
-              <Ionicons name="folder-open" size={18} color={Colors.primary} />
-            </TouchableOpacity>
-          </View>
-        )}
-        {workspaceRoot ? (
-          <Text style={styles.workspaceHint} numberOfLines={2}>
-            Agent project: {workspaceRoot}
+    <KeyboardAvoidingView
+      style={styles.container}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
+    >
+      {/* Sub Tabs Selector */}
+      <View style={styles.subTabBar}>
+        <TouchableOpacity
+          style={[styles.subTabButton, activeSubTab === 'files' && styles.activeSubTabButton]}
+          onPress={() => setActiveSubTab('files')}
+        >
+          <Ionicons name="folder-open" size={16} color={activeSubTab === 'files' ? Colors.primary : Colors.muted} />
+          <Text style={[styles.subTabButtonText, activeSubTab === 'files' && styles.activeSubTabButtonText]}>
+            File Explorer
           </Text>
-        ) : null}
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.subTabButton, activeSubTab === 'terminal' && styles.activeSubTabButton]}
+          onPress={() => setActiveSubTab('terminal')}
+        >
+          <Ionicons name="terminal" size={16} color={activeSubTab === 'terminal' ? Colors.primary : Colors.muted} />
+          <Text style={[styles.subTabButtonText, activeSubTab === 'terminal' && styles.activeSubTabButtonText]}>
+            Terminal
+          </Text>
+        </TouchableOpacity>
       </View>
 
-      {/* Project info */}
-      {projectInfo && !projectInfo.error && (
-        <View style={styles.projectInfo}>
-          <View style={styles.projectHeader}>
-            <Text style={styles.projectName}>{projectInfo.name}</Text>
-            <View style={styles.projectBadge}>
-              <Text style={styles.projectType}>{projectInfo.type}</Text>
+      {activeSubTab === 'files' ? (
+        <View style={{ flex: 1 }}>
+          {/* Path input */}
+          <View style={styles.pathContainer}>
+            <View style={styles.pathInputRow}>
+              <TextInput
+                style={styles.pathInput}
+                value={pathInput}
+                onChangeText={setPathInput}
+                placeholder="Enter path (e.g., C:\Projects or ~/code)"
+                placeholderTextColor={Colors.muted}
+                onSubmitEditing={() => loadDirectory(pathInput)}
+                autoCapitalize="none"
+                autoCorrect={false}
+              />
+              <TouchableOpacity
+                style={styles.goButton}
+                onPress={() => loadDirectory(pathInput)}
+              >
+                <Ionicons name="arrow-forward" size={20} color={Colors.foreground} />
+              </TouchableOpacity>
             </View>
-          </View>
-          <View style={styles.projectStats}>
-            {projectInfo.has_git && (
-              <View style={styles.statItem}>
-                <Ionicons name="git-branch" size={14} color={Colors.orange} />
-                <Text style={styles.statText}>Git</Text>
+
+            {/* Current path & navigation */}
+            {currentPath && (
+              <View style={styles.navRow}>
+                <TouchableOpacity
+                  style={[styles.navButton, !history.length && styles.navButtonDisabled]}
+                  onPress={goBack}
+                  disabled={!history.length}
+                >
+                  <Ionicons name="arrow-back" size={18} color={history.length ? Colors.foreground : Colors.muted} />
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.navButton} onPress={goToParent}>
+                  <Ionicons name="arrow-up" size={18} color={Colors.foreground} />
+                </TouchableOpacity>
+                <Text style={styles.currentPath} numberOfLines={1}>{currentPath}</Text>
+                <TouchableOpacity
+                  style={styles.hiddenToggle}
+                  onPress={() => {
+                    setShowHidden(!showHidden);
+                    if (currentPath) loadDirectory(currentPath, false);
+                  }}
+                >
+                  <Ionicons
+                    name={showHidden ? 'eye' : 'eye-off'}
+                    size={18}
+                    color={showHidden ? Colors.primary : Colors.muted}
+                  />
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.projectRootBtn} onPress={() => void setAsProjectRoot()}>
+                  <Ionicons name="folder-open" size={18} color={Colors.primary} />
+                </TouchableOpacity>
               </View>
             )}
-            <View style={styles.statItem}>
-              <Ionicons name="code" size={14} color={Colors.blue} />
-              <Text style={styles.statText}>{projectInfo.code_files} files</Text>
-            </View>
+            {workspaceRoot ? (
+              <Text style={styles.workspaceHint} numberOfLines={2}>
+                Agent project: {workspaceRoot}
+              </Text>
+            ) : null}
           </View>
-        </View>
-      )}
 
-      {/* Error */}
-      {error && (
-        <View style={styles.errorContainer}>
-          <Ionicons name="alert-circle" size={20} color={Colors.red} />
-          <Text style={styles.errorText}>{error}</Text>
-        </View>
-      )}
+          {/* Project info */}
+          {projectInfo && !projectInfo.error && (
+            <View style={styles.projectInfo}>
+              <View style={styles.projectHeader}>
+                <Text style={styles.projectName}>{projectInfo.name}</Text>
+                <View style={styles.projectBadge}>
+                  <Text style={styles.projectType}>{projectInfo.type}</Text>
+                </View>
+              </View>
+              <View style={styles.projectStats}>
+                {projectInfo.has_git && (
+                  <View style={styles.statItem}>
+                    <Ionicons name="git-branch" size={14} color={Colors.orange} />
+                    <Text style={styles.statText}>Git</Text>
+                  </View>
+                )}
+                <View style={styles.statItem}>
+                  <Ionicons name="code" size={14} color={Colors.blue} />
+                  <Text style={styles.statText}>{projectInfo.code_files} files</Text>
+                </View>
+              </View>
+            </View>
+          )}
 
-      {/* Loading */}
-      {loading && (
-        <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color={Colors.primary} />
-          <Text style={styles.loadingText}>Loading...</Text>
-        </View>
-      )}
+          {/* Error */}
+          {error && (
+            <View style={styles.errorContainer}>
+              <Ionicons name="alert-circle" size={20} color={Colors.red} />
+              <Text style={styles.errorText}>{error}</Text>
+            </View>
+          )}
 
-      {/* File list */}
-      {!loading && files.length > 0 && (
-        <FlatList
-          data={files}
-          renderItem={renderFileItem}
-          keyExtractor={item => item.path}
-          style={styles.fileList}
-          refreshControl={
-            <RefreshControl
-              refreshing={refreshing}
-              onRefresh={onRefresh}
-              tintColor={Colors.primary}
+          {/* Loading */}
+          {loading && (
+            <View style={styles.loadingContainer}>
+              <ActivityIndicator size="large" color={Colors.primary} />
+              <Text style={styles.loadingText}>Loading...</Text>
+            </View>
+          )}
+
+          {/* File list */}
+          {!loading && files.length > 0 && (
+            <FlatList
+              data={files}
+              renderItem={renderFileItem}
+              keyExtractor={item => item.path}
+              style={styles.fileList}
+              refreshControl={
+                <RefreshControl
+                  refreshing={refreshing}
+                  onRefresh={onRefresh}
+                  tintColor={Colors.primary}
+                />
+              }
             />
-          }
-        />
-      )}
+          )}
 
-      {/* Empty state */}
-      {!loading && !error && currentPath && files.length === 0 && (
-        <View style={styles.emptyContainer}>
-          <Ionicons name="folder-open-outline" size={48} color={Colors.muted} />
-          <Text style={styles.emptyText}>This folder is empty</Text>
+          {/* Empty state */}
+          {!loading && !error && currentPath && files.length === 0 && (
+            <View style={styles.emptyContainer}>
+              <Ionicons name="folder-open-outline" size={48} color={Colors.muted} />
+              <Text style={styles.emptyText}>This folder is empty</Text>
+            </View>
+          )}
+
+          {/* Initial state */}
+          {!loading && !error && !currentPath && (
+            <View style={styles.emptyContainer}>
+              <Ionicons name="folder-outline" size={48} color={Colors.muted} />
+              <Text style={styles.emptyText}>Enter a path to browse files</Text>
+              <Text style={styles.emptySubtext}>Examples:</Text>
+              <Text style={styles.examplePath}>C:\Users\YourName\Projects</Text>
+              <Text style={styles.examplePath}>~/code/my-project</Text>
+            </View>
+          )}
         </View>
-      )}
+      ) : (
+        <View style={{ flex: 1 }}>
+          {/* Header */}
+          <View style={styles.terminalHeader}>
+            <View style={styles.terminalHeaderLeft}>
+              <View style={styles.iconContainer}>
+                <Ionicons name="terminal" size={18} color={Colors.primary} />
+              </View>
+              <View>
+                <Text style={styles.terminalTitle}>Remote Terminal</Text>
+                <Text style={styles.terminalSubtitle}>Execute commands on backend</Text>
+              </View>
+            </View>
+            <TouchableOpacity onPress={clearTerminal} style={styles.clearBtn}>
+              <Ionicons name="trash-outline" size={18} color={Colors.muted} />
+            </TouchableOpacity>
+          </View>
 
-      {/* Initial state */}
-      {!loading && !error && !currentPath && (
-        <View style={styles.emptyContainer}>
-          <Ionicons name="folder-outline" size={48} color={Colors.muted} />
-          <Text style={styles.emptyText}>Enter a path to browse files</Text>
-          <Text style={styles.emptySubtext}>Examples:</Text>
-          <Text style={styles.examplePath}>C:\Users\YourName\Projects</Text>
-          <Text style={styles.examplePath}>~/code/my-project</Text>
+          {/* Terminal Output */}
+          <ScrollView
+            ref={terminalScrollViewRef}
+            style={styles.terminalContainer}
+            contentContainerStyle={styles.terminalContent}
+          >
+            {terminalLines.map((line) => (
+              <Text
+                key={line.id}
+                style={[
+                  styles.terminalLine,
+                  line.type === 'input' && styles.terminalInputLine,
+                  line.type === 'error' && styles.terminalErrorLine,
+                ]}
+              >
+                {line.content}
+              </Text>
+            ))}
+            {terminalRunning && (
+              <View style={styles.runningRow}>
+                <ActivityIndicator size="small" color={Colors.amber} />
+                <Text style={styles.runningText}>Running...</Text>
+              </View>
+            )}
+          </ScrollView>
+
+          {/* Input */}
+          <View style={styles.terminalInputContainer}>
+            <Text style={styles.terminalPrompt}>$</Text>
+            <TextInput
+              style={styles.terminalTextInput}
+              value={terminalInput}
+              onChangeText={setTerminalInput}
+              placeholder="Enter command..."
+              placeholderTextColor={Colors.mutedDark}
+              onSubmitEditing={handleRunTerminal}
+              editable={!terminalRunning}
+              returnKeyType="send"
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+            <TouchableOpacity
+              style={[styles.terminalRunBtn, (!terminalInput.trim() || terminalRunning) && styles.terminalRunBtnDisabled]}
+              onPress={handleRunTerminal}
+              disabled={!terminalInput.trim() || terminalRunning}
+            >
+              {terminalRunning ? (
+                <ActivityIndicator size="small" color={Colors.foreground} />
+              ) : (
+                <Ionicons name="play" size={18} color={Colors.foreground} />
+              )}
+            </TouchableOpacity>
+          </View>
         </View>
       )}
 
@@ -396,7 +553,7 @@ export default function FilesScreen() {
           )}
         </View>
       </Modal>
-    </View>
+    </KeyboardAvoidingView>
   );
 }
 
@@ -404,6 +561,36 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: Colors.background,
+  },
+  subTabBar: {
+    flexDirection: 'row',
+    backgroundColor: Colors.card,
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.border,
+    padding: 6,
+    gap: 8,
+  },
+  subTabButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 10,
+    borderRadius: 8,
+  },
+  activeSubTabButton: {
+    backgroundColor: Colors.surface,
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  subTabButtonText: {
+    color: Colors.muted,
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  activeSubTabButtonText: {
+    color: Colors.primary,
   },
   pathContainer: {
     padding: 12,
@@ -635,5 +822,108 @@ const styles = StyleSheet.create({
   fileStatText: {
     color: Colors.muted,
     fontSize: 12,
+  },
+  terminalContainer: {
+    flex: 1,
+    backgroundColor: Colors.surface,
+  },
+  terminalContent: {
+    padding: Spacing.lg,
+  },
+  terminalLine: {
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    fontSize: FontSize.sm,
+    color: Colors.greenLight,
+    lineHeight: 20,
+    marginBottom: 2,
+  },
+  terminalInputLine: {
+    color: Colors.primary,
+    fontWeight: '600',
+  },
+  terminalErrorLine: {
+    color: Colors.redLight,
+  },
+  runningRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+    marginTop: Spacing.sm,
+  },
+  runningText: {
+    color: Colors.amber,
+    fontSize: FontSize.sm,
+  },
+  terminalInputContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: Spacing.lg,
+    gap: Spacing.md,
+    borderTopWidth: 1,
+    borderTopColor: Colors.border,
+    backgroundColor: Colors.surface,
+  },
+  terminalPrompt: {
+    color: Colors.primary,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    fontSize: FontSize.md,
+    fontWeight: 'bold',
+  },
+  terminalTextInput: {
+    flex: 1,
+    backgroundColor: Colors.card,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    borderRadius: BorderRadius.md,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.md,
+    fontSize: FontSize.sm,
+    color: Colors.foreground,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  terminalRunBtn: {
+    backgroundColor: Colors.primary,
+    width: 44,
+    height: 44,
+    borderRadius: BorderRadius.md,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  terminalRunBtnDisabled: {
+    opacity: 0.5,
+  },
+  terminalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: Spacing.lg,
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.border,
+    backgroundColor: Colors.card,
+  },
+  terminalHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.md,
+  },
+  iconContainer: {
+    width: 36,
+    height: 36,
+    backgroundColor: Colors.primaryBg,
+    borderRadius: BorderRadius.md,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  terminalTitle: {
+    fontSize: FontSize.md,
+    fontWeight: 'bold',
+    color: Colors.foreground,
+  },
+  terminalSubtitle: {
+    fontSize: FontSize.xs,
+    color: Colors.muted,
+  },
+  clearBtn: {
+    padding: Spacing.sm,
   },
 });

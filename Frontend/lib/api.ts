@@ -665,11 +665,14 @@ export async function setOpenAIConfig(
   model = 'gpt-4o-mini'
 ): Promise<OpenAIConfigResponse> {
   try {
-    const result = await executeCommand(`setx JARVIS_OPENAI_API_KEY "${apiKey}"`);
+    const result = await apiPost<{ success: boolean; message: string }>('/project/ai/keys', {
+      openai_api_key: apiKey,
+      openai_model: model,
+    });
     if (result.success) {
-      return { success: true, message: 'OpenAI API key configured successfully', model };
+      return { success: true, message: 'OpenAI API key configured successfully on server', model };
     }
-    return { success: false, message: 'Failed to set OpenAI API key' };
+    return { success: false, message: result.message || 'Failed to set OpenAI API key' };
   } catch (error: unknown) {
     return {
       success: false,
@@ -690,6 +693,49 @@ export async function getOpenAIStatus(): Promise<OpenAIConfigResponse> {
     return {
       success: false,
       message: error instanceof Error ? error.message : 'Failed to check OpenAI status',
+    };
+  }
+}
+
+export interface GeminiConfigResponse {
+  success: boolean;
+  message: string;
+  model?: string;
+}
+
+export async function setGeminiConfig(
+  apiKey: string,
+  model = 'gemini-2.5-flash'
+): Promise<GeminiConfigResponse> {
+  try {
+    const result = await apiPost<{ success: boolean; message: string }>('/project/ai/keys', {
+      gemini_api_key: apiKey,
+      gemini_model: model,
+    });
+    if (result.success) {
+      return { success: true, message: 'Gemini API key configured successfully on server', model };
+    }
+    return { success: false, message: result.message || 'Failed to set Gemini API key' };
+  } catch (error: unknown) {
+    return {
+      success: false,
+      message: error instanceof Error ? error.message : 'Failed to configure Gemini',
+    };
+  }
+}
+
+export async function getGeminiStatus(): Promise<GeminiConfigResponse> {
+  try {
+    const providers = await getAIProviders();
+    const geminiProvider = providers.providers?.gemini;
+    return {
+      success: geminiProvider?.available || false,
+      message: geminiProvider?.message || 'Gemini not configured',
+    };
+  } catch (error: unknown) {
+    return {
+      success: false,
+      message: error instanceof Error ? error.message : 'Failed to check Gemini status',
     };
   }
 }

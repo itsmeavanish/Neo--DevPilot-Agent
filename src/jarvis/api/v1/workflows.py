@@ -515,6 +515,9 @@ async def generate_workflow(request: WorkflowGenerateRequest):
     except HTTPException:
         raise
     except Exception as exc:
+        from jarvis.core.exceptions import LLMConnectionError, LLMResponseError
+        if isinstance(exc, (LLMConnectionError, LLMResponseError)) or "model" in str(exc).lower():
+            raise HTTPException(status_code=503, detail=str(exc))
         raise HTTPException(status_code=500, detail=str(exc))
 
     workflow_id = None

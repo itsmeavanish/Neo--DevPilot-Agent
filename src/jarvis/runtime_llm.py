@@ -37,6 +37,11 @@ def _load() -> dict[str, Any]:
 def _save(data: dict[str, Any]) -> None:
     _CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     _CONFIG_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    try:
+        from jarvis.config import get_settings
+        get_settings.cache_clear()
+    except Exception:
+        pass
 
 
 def get_runtime_llm() -> dict[str, Any]:

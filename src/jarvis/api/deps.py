@@ -36,26 +36,59 @@ def get_tool_registry() -> ToolRegistry:
 
 
 def get_agent() -> AgentLoop:
-    """Get the agent loop instance."""
+    """Get the agent loop instance with dynamic LLM client updates."""
     global _agent_loop
     _initialize()
 
+    from jarvis.runtime_llm import get_effective_ai_provider, get_effective_ollama_host, get_effective_ollama_model
+    from jarvis.config import get_settings
+    from jarvis.auth.github_token_store import get_stored_github_token
+    
+    settings = get_settings()
+    provider = get_effective_ai_provider() or "auto"
+    
+    if provider == "auto":
+        if get_stored_github_token():
+            provider = "copilot"
+        elif settings.openai_api_key:
+            provider = "openai"
+        elif getattr(settings, "gemini_api_key", None):
+            provider = "gemini"
+        else:
+            provider = "ollama"
+
+    client = None
+    if provider == "ollama":
+        client = create_llm_client(
+            provider="ollama",
+            host=get_effective_ollama_host(),
+            model=get_effective_ollama_model(),
+        )
+    elif provider == "openai":
+        client = create_llm_client(
+            provider="openai",
+            api_key=settings.openai_api_key,
+            model=settings.openai_model,
+        )
+    elif provider == "gemini":
+        client = create_llm_client(
+            provider="gemini",
+            api_key=settings.gemini_api_key,
+            model=settings.gemini_model,
+        )
+    elif provider == "copilot":
+        client = create_llm_client(
+            provider="copilot",
+        )
+
     if _agent_loop is None:
-        settings = get_settings()
-
-        # Create LLM client if configured
-        llm_client = None
-        if settings.ollama_host:
-            llm_client = create_llm_client(
-                provider="ollama",
-                host=settings.ollama_host,
-                model=settings.ollama_model,
-            )
-
         _agent_loop = AgentLoop(
             tool_registry_instance=tool_registry,
-            llm_client=llm_client,
+            llm_client=client,
         )
+    else:
+        if client:
+            _agent_loop.set_llm_client(client)
 
     return _agent_loop
 

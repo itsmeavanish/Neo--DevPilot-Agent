@@ -164,3 +164,19 @@ class GeminiClient(LLMClient):
         except Exception as e:
             logger.warning(f"Failed to list Gemini models: {e}")
             return ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-1.5-pro", "gemini-1.5-flash"]
+
+    async def generate(
+        self,
+        prompt: str,
+        model: str | None = None,
+        system: str | None = None,
+        **kwargs,
+    ) -> str:
+        """Generate a response using Gemini."""
+        messages = [{"role": "user", "content": prompt}]
+        return await self.chat(
+            messages=messages,
+            system=system,
+            model=model or self.model,
+            **kwargs,
+        )

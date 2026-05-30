@@ -81,15 +81,15 @@ export default function TabLayout() {
       <Tabs.Screen
         name="files"
         options={{
-          title: 'Files',
+          title: 'Workspace',
+          tabBarLabel: 'Workspace',
           tabBarIcon: ({ color, size }) => <TabBarIcon name="folder-open" color={color} size={size} />,
         }}
       />
       <Tabs.Screen
         name="commands"
         options={{
-          title: 'Terminal',
-          tabBarIcon: ({ color, size }) => <TabBarIcon name="terminal" color={color} size={size} />,
+          href: null,
         }}
       />
       <Tabs.Screen

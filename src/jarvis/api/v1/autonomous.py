@@ -178,101 +178,119 @@ async def autonomous_execute(
             detail=f"Invalid approval_mode. Use one of: {[m.value for m in ApprovalMode]}",
         )
 
-    code = body.pairing_code.strip().upper()
-    reg = get_agent_registry()
-    if not reg.get_agent(code):
-        raise HTTPException(
-            status_code=503,
-            detail="Agent offline — start the laptop agent and keep pairing code active.",
-        )
-
-    intent = body.intent.strip()
-    if body.use_multi_agent:
-        sp = (body.specialist or specialist).lower()
-        if sp not in ("debug", "devops", "review", "git", "orchestrator"):
-            sp = "orchestrator"
-        intent = enhance_intent_for_specialist(body.intent.strip(), sp)
-
     task_id = str(uuid4())[:12]
-    ctx: dict[str, Any] = dict(body.context or {})
-    ctx["pairing_code"] = code
-    ctx["task_id"] = task_id
-    if body.workspace_root and str(body.workspace_root).strip():
-        ctx["workspace_root"] = str(body.workspace_root).strip()
-    if body.capabilities:
-        ctx["capabilities"] = body.capabilities
-
-    audit_log("autonomous_execute", pairing_code=code, detail={"intent_preview": intent[:200]}, success=None)
-
-    defer = body.defer_approval and approval in (ApprovalMode.CONFIRM, ApprovalMode.STRICT)
-
-    if defer:
-        await _run_health_and_memory_preface(agent, intent, ctx)
-        plan = await agent.planner.create_plan(intent, ctx)
-
-        if not plan.steps:
-            result = ExecutionResult(
-                task_id=task_id,
-                status=TaskStatus.COMPLETED,
-                plan=plan,
-                message=plan.reasoning or "No steps required",
+    try:
+        code = body.pairing_code.strip().upper()
+        reg = get_agent_registry()
+        if not reg.get_agent(code):
+            raise HTTPException(
+                status_code=503,
+                detail="Agent offline — start the laptop agent and keep pairing code active.",
             )
-            result.finalize()
-            audit_log("autonomous_complete", pairing_code=code, detail={"task_id": task_id, "status": "completed"}, success=True)
+
+        intent = body.intent.strip()
+        if body.use_multi_agent:
+            sp = (body.specialist or specialist).lower()
+            if sp not in ("debug", "devops", "review", "git", "orchestrator"):
+                sp = "orchestrator"
+            intent = enhance_intent_for_specialist(body.intent.strip(), sp)
+
+        ctx: dict[str, Any] = dict(body.context or {})
+        ctx["pairing_code"] = code
+        ctx["task_id"] = task_id
+        if body.workspace_root and str(body.workspace_root).strip():
+            ctx["workspace_root"] = str(body.workspace_root).strip()
+        if body.capabilities:
+            ctx["capabilities"] = body.capabilities
+
+        audit_log("autonomous_execute", pairing_code=code, detail={"intent_preview": intent[:200]}, success=None)
+
+        defer = body.defer_approval and approval in (ApprovalMode.CONFIRM, ApprovalMode.STRICT)
+
+        if defer:
+            await _run_health_and_memory_preface(agent, intent, ctx)
+            plan = await agent.planner.create_plan(intent, ctx)
+
+            if not plan.steps:
+                result = ExecutionResult(
+                    task_id=task_id,
+                    status=TaskStatus.COMPLETED,
+                    plan=plan,
+                    message=plan.reasoning or "No steps required",
+                )
+                result.finalize()
+                audit_log("autonomous_complete", pairing_code=code, detail={"task_id": task_id, "status": "completed"}, success=True)
+                return _result_dict(result, specialist)
+
+            high_risk = plan.get_high_risk_steps()
+            if approval == ApprovalMode.STRICT:
+                high_risk = list(plan.steps)
+
+            if high_risk:
+                await put_pending(
+                    PendingAutonomousRun(
+                        task_id=task_id,
+                        plan=plan,
+                        intent=intent,
+                        exec_context=dict(ctx),
+                        approval_mode=approval,
+                        pairing_code=code,
+                        created_at=time.time(),
+                    )
+                )
+                audit_log(
+                    "autonomous_awaiting_approval",
+                    pairing_code=code,
+                    detail={"task_id": task_id, "risky_steps": len(high_risk)},
+                    success=None,
+                )
+                return {
+                    "task_id": task_id,
+                    "status": TaskStatus.AWAITING_APPROVAL.value,
+                    "message": "Review the plan on your phone, then approve or reject.",
+                    "plan": plan.to_dict(),
+                    "approval_required": True,
+                    "steps_for_approval": [s.to_dict() for s in high_risk],
+                    "step_results": [],
+                    "error": None,
+                    "duration_ms": 0,
+                    "specialist": specialist,
+                }
+
+            result = await _execute_only_plan(agent, plan, intent, ctx, task_id)
+            audit_log(
+                "autonomous_complete",
+                pairing_code=code,
+                detail={"task_id": task_id, "status": result.status.value},
+                success=result.status == TaskStatus.COMPLETED,
+            )
             return _result_dict(result, specialist)
 
-        high_risk = plan.get_high_risk_steps()
-        if approval == ApprovalMode.STRICT:
-            high_risk = list(plan.steps)
-
-        if high_risk:
-            await put_pending(
-                PendingAutonomousRun(
-                    task_id=task_id,
-                    plan=plan,
-                    intent=intent,
-                    exec_context=dict(ctx),
-                    approval_mode=approval,
-                    pairing_code=code,
-                    created_at=time.time(),
-                )
-            )
-            audit_log(
-                "autonomous_awaiting_approval",
-                pairing_code=code,
-                detail={"task_id": task_id, "risky_steps": len(high_risk)},
-                success=None,
-            )
-            return {
-                "task_id": task_id,
-                "status": TaskStatus.AWAITING_APPROVAL.value,
-                "message": "Review the plan on your phone, then approve or reject.",
-                "plan": plan.to_dict(),
-                "approval_required": True,
-                "steps_for_approval": [s.to_dict() for s in high_risk],
-                "step_results": [],
-                "error": None,
-                "duration_ms": 0,
-                "specialist": specialist,
-            }
-
-        result = await _execute_only_plan(agent, plan, intent, ctx, task_id)
+        result = await agent.execute(intent=intent, context=ctx, approval_mode=approval)
         audit_log(
             "autonomous_complete",
             pairing_code=code,
-            detail={"task_id": task_id, "status": result.status.value},
+            detail={"task_id": result.task_id, "status": result.status.value},
             success=result.status == TaskStatus.COMPLETED,
         )
         return _result_dict(result, specialist)
 
-    result = await agent.execute(intent=intent, context=ctx, approval_mode=approval)
-    audit_log(
-        "autonomous_complete",
-        pairing_code=code,
-        detail={"task_id": result.task_id, "status": result.status.value},
-        success=result.status == TaskStatus.COMPLETED,
-    )
-    return _result_dict(result, specialist)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error executing autonomous task")
+        return {
+            "task_id": task_id,
+            "status": "error",
+            "message": f"Autonomous execution failed: {str(e)}",
+            "plan": None,
+            "approval_required": False,
+            "steps_for_approval": [],
+            "step_results": [],
+            "error": str(e),
+            "duration_ms": 0,
+            "specialist": specialist,
+        }
 
 
 @router.get("/runs/{task_id}")

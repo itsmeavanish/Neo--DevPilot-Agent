@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     openai_api_key: str = Field(default="", description="OpenAI API key")
     openai_model: str = Field(default="gpt-4o-mini", description="OpenAI model to use")
 
+    # Gemini Settings
+    gemini_api_key: str = Field(default="", description="Gemini API key")
+    gemini_model: str = Field(default="gemini-2.5-flash", description="Gemini model to use")
+
     # Database Settings (Phase 2)
     database_url: str | None = Field(
         default="postgresql://jarvis:jarvis_secret@localhost:5432/jarvis",
@@ -75,7 +79,19 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     """Get cached settings instance."""
-    return Settings()
+    s = Settings()
+    try:
+        import json
+        from pathlib import Path
+        config_path = Path.home() / ".jarvis" / "llm_runtime.json"
+        if config_path.exists():
+            runtime = json.loads(config_path.read_text(encoding="utf-8"))
+            for k, v in runtime.items():
+                if hasattr(s, k) and v is not None:
+                    setattr(s, k, v)
+    except Exception:
+        pass
+    return s
 
 
 __all__ = ["Settings", "get_settings"]

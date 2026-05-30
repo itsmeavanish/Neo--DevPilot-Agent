@@ -27,6 +27,8 @@ import {
   clearGitHubToken,
   getOpenAIStatus,
   setOpenAIConfig,
+  getGeminiStatus,
+  setGeminiConfig,
   getOllamaStatus,
   setOllamaConfig,
   getOllamaModels,
@@ -43,6 +45,7 @@ export default function SettingsScreen() {
   const [loadingAI, setLoadingAI] = useState(false);
   const [githubTokenStatus, setGithubTokenStatus] = useState<any>(null);
   const [openaiStatus, setOpenaiStatus] = useState<any>(null);
+  const [geminiStatus, setGeminiStatus] = useState<any>(null);
   const [ollamaStatus, setOllamaStatus] = useState<any>(null);
 
   // Copilot CLI states
@@ -53,11 +56,13 @@ export default function SettingsScreen() {
   // Modal states
   const [showGitHubTokenModal, setShowGitHubTokenModal] = useState(false);
   const [showOpenAIModal, setShowOpenAIModal] = useState(false);
+  const [showGeminiModal, setShowGeminiModal] = useState(false);
   const [showOllamaModal, setShowOllamaModal] = useState(false);
 
   // Input states
   const [githubTokenInput, setGithubTokenInput] = useState('');
   const [openaiKeyInput, setOpenaiKeyInput] = useState('');
+  const [geminiKeyInput, setGeminiKeyInput] = useState('');
   const [ollamaHostInput, setOllamaHostInput] = useState('http://localhost:11434');
   const [ollamaModelInput, setOllamaModelInput] = useState('llama3.2:1b');
   const [showServerUrlModal, setShowServerUrlModal] = useState(false);
@@ -103,6 +108,9 @@ export default function SettingsScreen() {
       // Get other provider statuses
       const openaiStat = await getOpenAIStatus();
       setOpenaiStatus(openaiStat);
+
+      const geminiStat = await getGeminiStatus();
+      setGeminiStatus(geminiStat);
 
       const ollamaStat = await getOllamaStatus();
       setOllamaStatus(ollamaStat);
@@ -193,6 +201,27 @@ export default function SettingsScreen() {
       }
     } catch (error: any) {
       Alert.alert('Error', error.message || 'Failed to configure OpenAI');
+    }
+  };
+
+  const handleGeminiConfig = async () => {
+    if (!geminiKeyInput.trim()) {
+      Alert.alert('Error', 'Please enter a Gemini API key');
+      return;
+    }
+
+    try {
+      const result = await setGeminiConfig(geminiKeyInput.trim());
+      if (result.success) {
+        setShowGeminiModal(false);
+        setGeminiKeyInput('');
+        await loadAIStatus();
+        Alert.alert('Success', result.message);
+      } else {
+        Alert.alert('Error', result.message);
+      }
+    } catch (error: any) {
+      Alert.alert('Error', error.message || 'Failed to configure Gemini');
     }
   };
 
@@ -448,6 +477,36 @@ export default function SettingsScreen() {
               </View>
             </View>
 
+            {/* Gemini */}
+            <View style={styles.providerCard}>
+              <View style={styles.providerHeader}>
+                <Ionicons name="sparkles-outline" size={20} color={Colors.primary} />
+                <Text style={styles.providerName}>Gemini</Text>
+                <View style={[styles.statusDot, {
+                  backgroundColor: aiProviders.providers.gemini?.available ? Colors.green : Colors.red
+                }]} />
+              </View>
+              <Text style={styles.providerStatus}>
+                {aiProviders.providers.gemini?.message || 'Not configured'}
+              </Text>
+              <View style={styles.providerActions}>
+                <TouchableOpacity
+                  style={[styles.providerButton, aiProviders.current === 'gemini' && styles.activeProvider]}
+                  onPress={() => handleProviderChange('gemini')}
+                >
+                  <Text style={[styles.providerButtonText, aiProviders.current === 'gemini' && styles.activeProviderText]}>
+                    {aiProviders.current === 'gemini' ? 'Active' : 'Use'}
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.configButton}
+                  onPress={() => setShowGeminiModal(true)}
+                >
+                  <Ionicons name="settings-outline" size={16} color={Colors.muted} />
+                </TouchableOpacity>
+              </View>
+            </View>
+
             {/* Ollama */}
             <View style={styles.providerCard}>
               <View style={styles.providerHeader}>
@@ -614,6 +673,44 @@ export default function SettingsScreen() {
                 <Text style={styles.modalSecondaryButtonText}>Cancel</Text>
               </TouchableOpacity>
               <TouchableOpacity style={styles.modalButton} onPress={handleOpenAIConfig}>
+                <Text style={styles.modalButtonText}>Save Key</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Gemini Modal */}
+      <Modal visible={showGeminiModal} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Gemini Configuration</Text>
+              <TouchableOpacity onPress={() => setShowGeminiModal(false)}>
+                <Ionicons name="close" size={24} color={Colors.muted} />
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.modalDescription}>
+              Enter your Google Gemini API key to enable Gemini 2.5 access.
+            </Text>
+            <TextInput
+              style={styles.modalInput}
+              placeholder="AIzaSyxxxxxxxxxxxxxxxxxxxx"
+              placeholderTextColor={Colors.muted}
+              value={geminiKeyInput}
+              onChangeText={setGeminiKeyInput}
+              secureTextEntry
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+            <View style={styles.modalActions}>
+              <TouchableOpacity
+                style={[styles.modalButton, styles.modalSecondaryButton]}
+                onPress={() => setShowGeminiModal(false)}
+              >
+                <Text style={styles.modalSecondaryButtonText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.modalButton} onPress={handleGeminiConfig}>
                 <Text style={styles.modalButtonText}>Save Key</Text>
               </TouchableOpacity>
             </View>
