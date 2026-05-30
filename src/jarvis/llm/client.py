@@ -124,6 +124,9 @@ def create_llm_client(
         from jarvis.llm.providers.anthropic import AnthropicClient
         return AnthropicClient(**kwargs)
 
+    elif provider == "gemini":
+        from jarvis.llm.providers.gemini import GeminiClient
+        return GeminiClient(**kwargs)
 
     else:
         raise ValueError(f"Unknown LLM provider: {provider}")
