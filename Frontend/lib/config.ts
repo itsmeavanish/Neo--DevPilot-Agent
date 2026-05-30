@@ -7,6 +7,7 @@ import * as SecureStore from 'expo-secure-store';
 
 const STORAGE_KEYS = {
   BACKEND_URL: 'jarvis_backend_url',
+  IS_CUSTOM_URL: 'jarvis_is_custom_url',
   PAIRING_CODE: 'jarvis_pairing_code',
   LAPTOP_NAME: 'jarvis_laptop_name',
   IS_PAIRED: 'jarvis_is_paired',
@@ -15,7 +16,7 @@ const STORAGE_KEYS = {
 } as const;
 
 /** Default public API base (ngrok). Override in Settings or use localhost only for same-machine dev. */
-export const DEFAULT_BACKEND_URL = 'https://precommercial-nubbly-theda.ngrok-free.dev';
+export const DEFAULT_BACKEND_URL = 'https://neo-api-oths.onrender.com';
 
 class ConfigManager {
   private _backendUrl: string = DEFAULT_BACKEND_URL;
@@ -62,13 +63,18 @@ class ConfigManager {
 
     try {
       const savedUrl = await SecureStore.getItemAsync(STORAGE_KEYS.BACKEND_URL);
+      const isCustomUrl = await SecureStore.getItemAsync(STORAGE_KEYS.IS_CUSTOM_URL);
       const savedCode = await SecureStore.getItemAsync(STORAGE_KEYS.PAIRING_CODE);
       const savedName = await SecureStore.getItemAsync(STORAGE_KEYS.LAPTOP_NAME);
       const savedPaired = await SecureStore.getItemAsync(STORAGE_KEYS.IS_PAIRED);
       const savedKey = await SecureStore.getItemAsync(STORAGE_KEYS.API_KEY);
       const savedWorkspace = await SecureStore.getItemAsync(STORAGE_KEYS.WORKSPACE_ROOT);
 
-      if (savedUrl) this._backendUrl = savedUrl;
+      if (isCustomUrl === 'true' && savedUrl) {
+        this._backendUrl = savedUrl;
+      } else {
+        this._backendUrl = DEFAULT_BACKEND_URL;
+      }
       if (savedCode) this._pairingCode = savedCode;
       if (savedName) this._laptopName = savedName;
       if (savedPaired) this._isPaired = savedPaired === 'true';
@@ -109,10 +115,11 @@ class ConfigManager {
     }
   }
 
-  async setBackendUrl(url: string): Promise<void> {
+  async setBackendUrl(url: string, isCustom: boolean = true): Promise<void> {
     this._backendUrl = url.replace(/\/$/, '');
     try {
       await SecureStore.setItemAsync(STORAGE_KEYS.BACKEND_URL, this._backendUrl);
+      await SecureStore.setItemAsync(STORAGE_KEYS.IS_CUSTOM_URL, isCustom ? 'true' : 'false');
     } catch (e) {
       console.error('Failed to save backend URL:', e);
     }

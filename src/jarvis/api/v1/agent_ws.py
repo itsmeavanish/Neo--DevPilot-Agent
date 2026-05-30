@@ -101,11 +101,15 @@ async def agent_websocket_endpoint(websocket: WebSocket, device_id: str):
 
     except WebSocketDisconnect:
         logger.info(f"Agent disconnected: {did}")
-        registry.unregister_agent(did)
+        current_agent = registry.get_agent(did)
+        if current_agent and current_agent.websocket == websocket:
+            registry.unregister_agent(did)
 
     except Exception as e:
         logger.error(f"WebSocket error with agent {did}: {e}")
-        registry.unregister_agent(did)
+        current_agent = registry.get_agent(did)
+        if current_agent and current_agent.websocket == websocket:
+            registry.unregister_agent(did)
         try:
             await websocket.close()
         except Exception as close_err:

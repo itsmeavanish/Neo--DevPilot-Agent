@@ -9,6 +9,7 @@ import {
   StyleSheet,
   ActivityIndicator,
   Alert,
+  Modal,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Colors } from '../lib/theme';
@@ -19,6 +20,8 @@ function PairingScreen({ onPaired }: { onPaired: () => void }) {
   const [code, setCode] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [showUrlModal, setShowUrlModal] = useState(false);
+  const [serverUrlInput, setServerUrlInput] = useState(configManager.backendUrl);
 
   const handlePair = async () => {
     const cleanCode = code.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
@@ -45,8 +48,37 @@ function PairingScreen({ onPaired }: { onPaired: () => void }) {
     }
   };
 
+  const handleSaveServerUrl = async () => {
+    let url = serverUrlInput.trim();
+    if (!url) {
+      Alert.alert('Error', 'Please enter a Server URL');
+      return;
+    }
+    if (!/^https?:\/\//i.test(url)) {
+      url = 'https://' + url;
+    }
+    try {
+      await configManager.setBackendUrl(url, true);
+      setShowUrlModal(false);
+      Alert.alert('Success', 'Server URL updated successfully');
+    } catch (e: any) {
+      Alert.alert('Error', e.message || 'Failed to save Server URL');
+    }
+  };
+
   return (
     <View style={styles.container}>
+      {/* Settings / Server URL Button */}
+      <TouchableOpacity
+        style={styles.serverSettingsButton}
+        onPress={() => {
+          setServerUrlInput(configManager.backendUrl);
+          setShowUrlModal(true);
+        }}
+      >
+        <Ionicons name="cog-outline" size={24} color={Colors.muted} />
+      </TouchableOpacity>
+
       <View style={styles.content}>
         <Ionicons name="laptop-outline" size={80} color={Colors.primary} />
         <Text style={styles.title}>Connect to Your Laptop</Text>
@@ -95,6 +127,43 @@ function PairingScreen({ onPaired }: { onPaired: () => void }) {
           <Text style={styles.instructionStep}>3. Copy the 6-character code shown</Text>
         </View>
       </View>
+
+      {/* Server URL Config Modal */}
+      <Modal visible={showUrlModal} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Configure Server URL</Text>
+              <TouchableOpacity onPress={() => setShowUrlModal(false)}>
+                <Ionicons name="close" size={24} color={Colors.muted} />
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.modalDescription}>
+              Enter your backend server URL (e.g. ngrok HTTPS URL or public server domain).
+            </Text>
+            <TextInput
+              style={styles.modalInput}
+              placeholder="https://your-server.ngrok-free.dev"
+              placeholderTextColor={Colors.muted}
+              value={serverUrlInput}
+              onChangeText={setServerUrlInput}
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+            <View style={styles.modalActions}>
+              <TouchableOpacity
+                style={[styles.modalButton, styles.modalSecondaryButton]}
+                onPress={() => setShowUrlModal(false)}
+              >
+                <Text style={styles.modalSecondaryButtonText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.modalButton} onPress={handleSaveServerUrl}>
+                <Text style={styles.modalButtonText}>Save URL</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -273,4 +342,42 @@ const styles = StyleSheet.create({
     color: Colors.muted,
     fontSize: 16,
   },
+  serverSettingsButton: {
+    position: 'absolute',
+    top: 50,
+    right: 24,
+    padding: 10,
+    zIndex: 10,
+  },
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'center', padding: 20 },
+  modalContent: { backgroundColor: Colors.card, borderRadius: 16, padding: 20, maxHeight: '80%' },
+  modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
+  modalTitle: { fontSize: 20, fontWeight: 'bold', color: Colors.foreground },
+  modalDescription: { fontSize: 14, color: Colors.muted, marginBottom: 16, lineHeight: 20 },
+  modalInput: {
+    backgroundColor: Colors.cardLight,
+    borderRadius: 8,
+    padding: 12,
+    fontSize: 16,
+    color: Colors.foreground,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    marginBottom: 16,
+  },
+  modalActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 12 },
+  modalButton: {
+    backgroundColor: Colors.primary,
+    paddingVertical: 10,
+    paddingHorizontal: 20,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modalButtonText: { color: Colors.background, fontSize: 15, fontWeight: '600' },
+  modalSecondaryButton: {
+    backgroundColor: Colors.cardLight,
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  modalSecondaryButtonText: { color: Colors.foreground, fontSize: 15, fontWeight: '500' },
 });

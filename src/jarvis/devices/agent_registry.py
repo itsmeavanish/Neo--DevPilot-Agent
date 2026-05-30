@@ -62,6 +62,17 @@ class AgentRegistry:
         websocket
     ) -> RegisteredAgent:
         did = normalize_agent_device_id(device_id)
+
+        # If there is already an agent connection, proactively close the old websocket
+        if did in self.agents:
+            old_agent = self.agents[did]
+            logger.info(f"Closing old agent connection for {did} before registering new one")
+            try:
+                # websocket.close() is async, schedule it as a task on the running loop
+                asyncio.create_task(old_agent.websocket.close())
+            except Exception as e:
+                logger.warning(f"Error closing old websocket for {did}: {e}")
+
         agent = RegisteredAgent(
             device_id=did,
             hostname=hostname,

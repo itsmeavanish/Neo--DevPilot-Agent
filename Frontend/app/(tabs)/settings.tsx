@@ -60,6 +60,8 @@ export default function SettingsScreen() {
   const [openaiKeyInput, setOpenaiKeyInput] = useState('');
   const [ollamaHostInput, setOllamaHostInput] = useState('http://localhost:11434');
   const [ollamaModelInput, setOllamaModelInput] = useState('llama3.2:1b');
+  const [showServerUrlModal, setShowServerUrlModal] = useState(false);
+  const [serverUrlInput, setServerUrlInput] = useState('');
 
   useEffect(() => {
     loadStatus();
@@ -214,6 +216,25 @@ export default function SettingsScreen() {
     }
   };
 
+  const handleSaveServerUrl = async () => {
+    let url = serverUrlInput.trim();
+    if (!url) {
+      Alert.alert('Error', 'Please enter a Server URL');
+      return;
+    }
+    if (!/^https?:\/\//i.test(url)) {
+      url = 'https://' + url;
+    }
+    try {
+      await configManager.setBackendUrl(url, true);
+      setShowServerUrlModal(false);
+      await loadStatus();
+      Alert.alert('Success', 'Server URL updated successfully');
+    } catch (error: any) {
+      Alert.alert('Error', error.message || 'Failed to save Server URL');
+    }
+  };
+
   const handleCopilotModelChange = async (selectedModel: string) => {
     try {
       const result = await setCopilotModel(selectedModel);
@@ -308,11 +329,22 @@ export default function SettingsScreen() {
                 </Text>
               )}
             </View>
-            <View style={styles.statusBadge}>
-              <View style={[styles.statusDot, { backgroundColor: serverOnline ? Colors.green : Colors.red }]} />
-              <Text style={[styles.statusText, { color: serverOnline ? Colors.green : Colors.red }]}> 
-                {serverOnline ? 'Online' : 'Offline'}
-              </Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+              <TouchableOpacity
+                style={styles.configButton}
+                onPress={() => {
+                  setServerUrlInput(configManager.backendUrl);
+                  setShowServerUrlModal(true);
+                }}
+              >
+                <Ionicons name="create-outline" size={16} color={Colors.muted} />
+              </TouchableOpacity>
+              <View style={styles.statusBadge}>
+                <View style={[styles.statusDot, { backgroundColor: serverOnline ? Colors.green : Colors.red }]} />
+                <Text style={[styles.statusText, { color: serverOnline ? Colors.green : Colors.red }]}> 
+                  {serverOnline ? 'Online' : 'Offline'}
+                </Text>
+              </View>
             </View>
           </View>
         </View>
@@ -693,6 +725,43 @@ export default function SettingsScreen() {
                 onPress={() => setShowCopilotModelModal(false)}
               >
                 <Text style={styles.modalSecondaryButtonText}>Close</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Server URL Modal */}
+      <Modal visible={showServerUrlModal} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Configure Server URL</Text>
+              <TouchableOpacity onPress={() => setShowServerUrlModal(false)}>
+                <Ionicons name="close" size={24} color={Colors.muted} />
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.modalDescription}>
+              Enter your backend server URL (e.g. ngrok HTTPS URL or public server domain).
+            </Text>
+            <TextInput
+              style={styles.modalInput}
+              placeholder="https://your-server.ngrok-free.dev"
+              placeholderTextColor={Colors.muted}
+              value={serverUrlInput}
+              onChangeText={setServerUrlInput}
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+            <View style={styles.modalActions}>
+              <TouchableOpacity
+                style={[styles.modalButton, styles.modalSecondaryButton]}
+                onPress={() => setShowServerUrlModal(false)}
+              >
+                <Text style={styles.modalSecondaryButtonText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.modalButton} onPress={handleSaveServerUrl}>
+                <Text style={styles.modalButtonText}>Save URL</Text>
               </TouchableOpacity>
             </View>
           </View>

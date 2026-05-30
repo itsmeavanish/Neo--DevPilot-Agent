@@ -22,7 +22,7 @@ import websockets
 import psutil
 
 # Configuration
-SERVER_URL = os.getenv("JARVIS_SERVER", "https://precommercial-nubbly-theda.ngrok-free.dev")
+SERVER_URL = os.getenv("JARVIS_SERVER", "https://neo-api-oths.onrender.com")
 DEVICE_NAME = os.getenv("JARVIS_DEVICE_NAME", platform.node())
 # Generate or load pairing code (unique per laptop)
 CONFIG_DIR = Path.home() / ".jarvis"
