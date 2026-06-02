@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     gemini_api_key: str = Field(default="", description="Gemini API key")
     gemini_model: str = Field(default="gemini-2.5-flash", description="Gemini model to use")
 
+    # FreeLLM Settings
+    freellm_api_key: str = Field(default="", description="FreeLLM API key")
+    freellm_api_url: str = Field(default="http://localhost:3001/v1", description="FreeLLM API base URL")
+    freellm_model: str = Field(default="auto", description="FreeLLM model to use")
+
     # Database Settings (Phase 2)
     database_url: str | None = Field(
         default="postgresql://jarvis:jarvis_secret@localhost:5432/jarvis",

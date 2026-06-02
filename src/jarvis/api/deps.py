@@ -43,10 +43,10 @@ def get_agent() -> AgentLoop:
     from jarvis.runtime_llm import get_effective_ai_provider, get_effective_ollama_host, get_effective_ollama_model
     from jarvis.config import get_settings
     from jarvis.auth.github_token_store import get_stored_github_token
-    
+
     settings = get_settings()
     provider = get_effective_ai_provider() or "auto"
-    
+
     if provider == "auto":
         if get_stored_github_token():
             provider = "copilot"
@@ -54,11 +54,17 @@ def get_agent() -> AgentLoop:
             provider = "openai"
         elif getattr(settings, "gemini_api_key", None):
             provider = "gemini"
+        elif getattr(settings, "freellm_api_key", None):
+            provider = "freellm"
         else:
             provider = "ollama"
 
     client = None
-    if provider == "ollama":
+    if provider == "freellm":
+        client = create_llm_client(
+            provider="freellm",
+        )
+    elif provider == "ollama":
         client = create_llm_client(
             provider="ollama",
             host=get_effective_ollama_host(),

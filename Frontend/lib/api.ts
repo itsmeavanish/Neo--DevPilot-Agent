@@ -540,6 +540,7 @@ export async function getAIProviders(): Promise<AIProvidersResponse> {
         copilot: { available: false, message: 'API connection failed' },
         openai: { available: false, message: 'API connection failed' },
         ollama: { available: false, message: 'API connection failed' },
+        freellm: { available: false, message: 'API connection failed' },
         cursor: { available: false, message: 'Not available' },
       },
     };
@@ -693,6 +694,52 @@ export async function getOpenAIStatus(): Promise<OpenAIConfigResponse> {
     return {
       success: false,
       message: error instanceof Error ? error.message : 'Failed to check OpenAI status',
+    };
+  }
+}
+
+
+export interface FreeLLMConfigResponse {
+  success: boolean;
+  message: string;
+  model?: string;
+}
+
+export async function setFreeLLMConfig(
+  apiKey: string,
+  apiUrl: string = 'http://localhost:3001/v1',
+  model = 'auto'
+): Promise<FreeLLMConfigResponse> {
+  try {
+    const result = await apiPost<{ success: boolean; message: string }>('/project/ai/keys', {
+      freellm_api_key: apiKey,
+      freellm_api_url: apiUrl,
+      freellm_model: model,
+    });
+    if (result.success) {
+      return { success: true, message: 'FreeLLM API configured successfully', model };
+    }
+    return { success: false, message: result.message || 'Failed to set FreeLLM API key' };
+  } catch (error: unknown) {
+    return {
+      success: false,
+      message: error instanceof Error ? error.message : 'Failed to configure FreeLLM',
+    };
+  }
+}
+
+export async function getFreeLLMStatus(): Promise<FreeLLMConfigResponse> {
+  try {
+    const providers = await getAIProviders();
+    const freellmProvider = providers.providers?.freellm;
+    return {
+      success: freellmProvider?.available || false,
+      message: freellmProvider?.message || 'FreeLLM not configured',
+    };
+  } catch (error: unknown) {
+    return {
+      success: false,
+      message: error instanceof Error ? error.message : 'Failed to check FreeLLM status',
     };
   }
 }

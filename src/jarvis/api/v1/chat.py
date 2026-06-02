@@ -121,6 +121,13 @@ async def _get_llm_client():
     settings = get_settings()
 
     # 1. OpenAI (if key set)
+    if getattr(settings, "freellm_api_key", None):
+        from jarvis.llm.providers.freellm import FreeLLMClient
+        client = FreeLLMClient(api_key=settings.freellm_api_key, base_url=getattr(settings, "freellm_api_url", "http://localhost:3001/v1"))
+        if await client.is_available():
+            return client
+
+    # 1.5 OpenAI (if key set)
     if settings.openai_api_key:
         from jarvis.llm.providers.openai import OpenAIClient
         client = OpenAIClient(api_key=settings.openai_api_key, model=settings.openai_model)

@@ -128,6 +128,10 @@ def create_llm_client(
         from jarvis.llm.providers.gemini import GeminiClient
         return GeminiClient(**kwargs)
 
+    elif provider == "freellm":
+        from jarvis.llm.providers.freellm import FreeLLMClient
+        return FreeLLMClient(**kwargs)
+
     else:
         raise ValueError(f"Unknown LLM provider: {provider}")
 
