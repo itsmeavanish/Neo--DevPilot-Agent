@@ -28,6 +28,8 @@ import {
   getOpenAIStatus,
   setOpenAIConfig,
   getGeminiStatus,
+  getFreeLLMStatus,
+  setFreeLLMConfig,
   setGeminiConfig,
   getOllamaStatus,
   setOllamaConfig,
@@ -46,6 +48,7 @@ export default function SettingsScreen() {
   const [githubTokenStatus, setGithubTokenStatus] = useState<any>(null);
   const [openaiStatus, setOpenaiStatus] = useState<any>(null);
   const [geminiStatus, setGeminiStatus] = useState<any>(null);
+  const [freellmStatus, setFreellmStatus] = useState<any>(null);
   const [ollamaStatus, setOllamaStatus] = useState<any>(null);
 
   // Copilot CLI states
@@ -57,12 +60,15 @@ export default function SettingsScreen() {
   const [showGitHubTokenModal, setShowGitHubTokenModal] = useState(false);
   const [showOpenAIModal, setShowOpenAIModal] = useState(false);
   const [showGeminiModal, setShowGeminiModal] = useState(false);
+  const [showFreellmModal, setShowFreellmModal] = useState(false);
   const [showOllamaModal, setShowOllamaModal] = useState(false);
 
   // Input states
   const [githubTokenInput, setGithubTokenInput] = useState('');
   const [openaiKeyInput, setOpenaiKeyInput] = useState('');
   const [geminiKeyInput, setGeminiKeyInput] = useState('');
+  const [freellmKeyInput, setFreellmKeyInput] = useState('');
+  const [freellmUrlInput, setFreellmUrlInput] = useState('http://localhost:3001/v1');
   const [ollamaHostInput, setOllamaHostInput] = useState('http://localhost:11434');
   const [ollamaModelInput, setOllamaModelInput] = useState('llama3.2:1b');
   const [showServerUrlModal, setShowServerUrlModal] = useState(false);
@@ -111,6 +117,9 @@ export default function SettingsScreen() {
 
       const geminiStat = await getGeminiStatus();
       setGeminiStatus(geminiStat);
+
+      const freellmStat = await getFreeLLMStatus();
+      setFreellmStatus(freellmStat);
 
       const ollamaStat = await getOllamaStatus();
       setOllamaStatus(ollamaStat);
@@ -203,6 +212,29 @@ export default function SettingsScreen() {
       Alert.alert('Error', error.message || 'Failed to configure OpenAI');
     }
   };
+
+
+  const handleFreellmConfig = async () => {
+    if (!freellmKeyInput.trim() || !freellmUrlInput.trim()) {
+      Alert.alert('Error', 'Please enter a FreeLLM API key and URL');
+      return;
+    }
+
+    try {
+      const result = await setFreeLLMConfig(freellmKeyInput.trim(), freellmUrlInput.trim());
+      if (result.success) {
+        setShowFreellmModal(false);
+        setFreellmKeyInput('');
+        await loadAIStatus();
+        Alert.alert('Success', result.message);
+      } else {
+        Alert.alert('Error', result.message);
+      }
+    } catch (error: any) {
+      Alert.alert('Error', error.message || 'Failed to configure FreeLLM');
+    }
+  };
+
 
   const handleGeminiConfig = async () => {
     if (!geminiKeyInput.trim()) {
@@ -370,7 +402,7 @@ export default function SettingsScreen() {
               </TouchableOpacity>
               <View style={styles.statusBadge}>
                 <View style={[styles.statusDot, { backgroundColor: serverOnline ? Colors.green : Colors.red }]} />
-                <Text style={[styles.statusText, { color: serverOnline ? Colors.green : Colors.red }]}> 
+                <Text style={[styles.statusText, { color: serverOnline ? Colors.green : Colors.red }]}>
                   {serverOnline ? 'Online' : 'Offline'}
                 </Text>
               </View>
@@ -537,6 +569,37 @@ export default function SettingsScreen() {
               </View>
             </View>
 
+
+            {/* FreeLLM */}
+            <View style={styles.providerCard}>
+              <View style={styles.providerHeader}>
+                <Ionicons name="infinite-outline" size={20} color={Colors.primary} />
+                <Text style={styles.providerName}>FreeLLM</Text>
+                <View style={[styles.statusDot, {
+                  backgroundColor: aiProviders.providers.freellm?.available ? Colors.green : Colors.red
+                }]} />
+              </View>
+              <Text style={styles.providerStatus}>
+                {aiProviders.providers.freellm?.message || 'Not configured'}
+              </Text>
+              <View style={styles.providerActions}>
+                <TouchableOpacity
+                  style={[styles.providerButton, aiProviders.current === 'freellm' && styles.activeProvider]}
+                  onPress={() => handleProviderChange('freellm')}
+                >
+                  <Text style={[styles.providerButtonText, aiProviders.current === 'freellm' && styles.activeProviderText]}>
+                    {aiProviders.current === 'freellm' ? 'Active' : 'Use'}
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.configButton}
+                  onPress={() => setShowFreellmModal(true)}
+                >
+                  <Ionicons name="settings-outline" size={16} color={Colors.foreground} />
+                </TouchableOpacity>
+              </View>
+            </View>
+
             {/* Cursor */}
             <View style={styles.providerCard}>
               <View style={styles.providerHeader}>
@@ -681,6 +744,51 @@ export default function SettingsScreen() {
       </Modal>
 
       {/* Gemini Modal */}
+
+      <Modal visible={showFreellmModal} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Configure FreeLLM</Text>
+              <TouchableOpacity onPress={() => setShowFreellmModal(false)}>
+                <Ionicons name="close" size={24} color={Colors.muted} />
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.modalDescription}>
+              Enter your FreeLLM API key and server URL to use it as an AI provider.
+            </Text>
+            <TextInput
+              style={styles.modalInput}
+              placeholder="freellmapi-..."
+              placeholderTextColor={Colors.muted}
+              value={freellmKeyInput}
+              onChangeText={setFreellmKeyInput}
+              secureTextEntry
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+            <Text style={styles.inputLabel}>Server URL</Text>
+            <TextInput
+              style={styles.modalInput}
+              placeholder="http://localhost:3001/v1"
+              placeholderTextColor={Colors.muted}
+              value={freellmUrlInput}
+              onChangeText={setFreellmUrlInput}
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+            <View style={styles.modalActions}>
+              <TouchableOpacity style={[styles.modalButton, styles.modalSecondaryButton]} onPress={() => setShowFreellmModal(false)}>
+                <Text style={styles.modalSecondaryButtonText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.modalButton} onPress={handleFreellmConfig}>
+                <Text style={styles.modalButtonText}>Save</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
       <Modal visible={showGeminiModal} transparent animationType="slide">
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>

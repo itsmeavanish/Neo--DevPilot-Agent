@@ -667,6 +667,26 @@ async def _check_gemini_available() -> tuple[bool, str]:
         return False, f"Gemini error: {str(e)}"
 
 
+
+async def _check_freellm_available() -> tuple[bool, str]:
+    """Check if FreeLLM API is available."""
+    from jarvis.config import get_settings
+    settings = get_settings()
+
+    if not getattr(settings, "freellm_api_key", None):
+        return False, "FreeLLM API key not configured"
+
+    try:
+        from jarvis.llm.providers.freellm import FreeLLMClient
+        client = FreeLLMClient(api_key=settings.freellm_api_key, base_url=getattr(settings, "freellm_api_url", "http://localhost:3001/v1"))
+        is_available = await client.is_available()
+        if is_available:
+            return True, "FreeLLM API configured"
+        else:
+            return False, "FreeLLM API key invalid or expired"
+    except Exception as e:
+        return False, f"FreeLLM error: {str(e)}"
+
 @router.get("/project/ai/providers", response_model=AIProvidersResponse)
 async def get_ai_providers():
     """Get available AI providers with real availability checks."""
@@ -675,6 +695,7 @@ async def get_ai_providers():
     copilot_available, copilot_message = await _check_copilot_available()
     openai_available, openai_message = await _check_openai_available()
     gemini_available, gemini_message = await _check_gemini_available()
+    freellm_available, freellm_message = await _check_freellm_available()
 
     providers = {
         "ollama": AIProviderStatus(
@@ -697,6 +718,11 @@ async def get_ai_providers():
             message=gemini_message,
             selected=_current_provider() in ("gemini", "auto")
         ),
+        "freellm": AIProviderStatus(
+            available=freellm_available,
+            message=freellm_message,
+            selected=_current_provider() in ("freellm", "auto")
+        ),
         "cursor": AIProviderStatus(
             available=False,
             message="Cursor AI (coming soon)",
@@ -716,7 +742,7 @@ async def set_ai_provider(request: SetProviderRequest):
     """Set the current AI provider."""
     global _current_ai_provider
 
-    valid_providers = ["auto", "ollama", "copilot", "openai", "gemini", "cursor"]
+    valid_providers = ["auto", "ollama", "copilot", "openai", "gemini", "freellm", "cursor"]
     if request.provider not in valid_providers:
         return {"success": False, "provider": request.provider, "message": f"Invalid provider. Choose from: {valid_providers}"}
 
@@ -734,6 +760,7 @@ async def set_ai_provider(request: SetProviderRequest):
         "copilot": _check_copilot_available,
         "openai": _check_openai_available,
         "gemini": _check_gemini_available,
+        "freellm": _check_freellm_available,
     }
     if request.provider in checks:
         ok, msg = await checks[request.provider]()
@@ -754,6 +781,9 @@ class AIKeysRequest(BaseModel):
     openai_model: Optional[str] = None
     gemini_api_key: Optional[str] = None
     gemini_model: Optional[str] = None
+    freellm_api_key: Optional[str] = None
+    freellm_api_url: Optional[str] = None
+    freellm_model: Optional[str] = None
 
 
 @router.post("/project/ai/keys")
@@ -771,6 +801,12 @@ async def save_ai_keys(body: AIKeysRequest):
         runtime["gemini_api_key"] = body.gemini_api_key.strip()
     if body.gemini_model is not None:
         runtime["gemini_model"] = body.gemini_model.strip()
+    if body.freellm_api_key is not None:
+        runtime["freellm_api_key"] = body.freellm_api_key.strip()
+    if body.freellm_api_url is not None:
+        runtime["freellm_api_url"] = body.freellm_api_url.strip()
+    if body.freellm_model is not None:
+        runtime["freellm_model"] = body.freellm_model.strip()
         
     _save(runtime)
     get_settings.cache_clear()
