@@ -50,10 +50,6 @@ def get_agent() -> AgentLoop:
     if provider == "auto":
         if get_stored_github_token():
             provider = "copilot"
-        elif settings.openai_api_key:
-            provider = "openai"
-        elif getattr(settings, "gemini_api_key", None):
-            provider = "gemini"
         elif getattr(settings, "freellm_api_key", None):
             provider = "freellm"
         else:
@@ -69,18 +65,6 @@ def get_agent() -> AgentLoop:
             provider="ollama",
             host=get_effective_ollama_host(),
             model=get_effective_ollama_model(),
-        )
-    elif provider == "openai":
-        client = create_llm_client(
-            provider="openai",
-            api_key=settings.openai_api_key,
-            model=settings.openai_model,
-        )
-    elif provider == "gemini":
-        client = create_llm_client(
-            provider="gemini",
-            api_key=settings.gemini_api_key,
-            model=settings.gemini_model,
         )
     elif provider == "copilot":
         client = create_llm_client(

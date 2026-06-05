@@ -17,14 +17,14 @@ from jarvis.core.constants import RiskLevel
 
 
 async def _get_llm():
-    """Return the first available LLM client (OpenAI → Ollama → Copilot)."""
+    """Return the first available LLM client (FreeLLM → Ollama → Copilot)."""
     from jarvis.config import get_settings
     settings = get_settings()
 
-    if settings.openai_api_key:
+    if getattr(settings, "freellm_api_key", None):
         try:
-            from jarvis.llm.providers.openai import OpenAIClient
-            client = OpenAIClient(api_key=settings.openai_api_key, model=settings.openai_model)
+            from jarvis.llm.providers.freellm import FreeLLMClient
+            client = FreeLLMClient(api_key=settings.freellm_api_key, base_url=getattr(settings, "freellm_api_url", "http://localhost:3001/v1"))
             if await client.is_available():
                 return client
         except Exception:

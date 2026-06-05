@@ -95,14 +95,14 @@ class LLMClient(ABC):
 
 
 def create_llm_client(
-    provider: str = "ollama",
+    provider: str = "freellm",
     **kwargs,
 ) -> LLMClient:
     """
     Factory function to create an LLM client.
 
     Args:
-        provider: Provider name ("ollama", "copilot", "openai", "anthropic")
+        provider: Provider name ("ollama", "copilot", "freellm")
         **kwargs: Provider-specific configuration
 
     Returns:
@@ -115,18 +115,6 @@ def create_llm_client(
     elif provider == "copilot":
         from jarvis.llm.providers.copilot import CopilotClient
         return CopilotClient(**kwargs)
-
-    elif provider == "openai":
-        from jarvis.llm.providers.openai import OpenAIClient
-        return OpenAIClient(**kwargs)
-
-    elif provider == "anthropic":
-        from jarvis.llm.providers.anthropic import AnthropicClient
-        return AnthropicClient(**kwargs)
-
-    elif provider == "gemini":
-        from jarvis.llm.providers.gemini import GeminiClient
-        return GeminiClient(**kwargs)
 
     elif provider == "freellm":
         from jarvis.llm.providers.freellm import FreeLLMClient

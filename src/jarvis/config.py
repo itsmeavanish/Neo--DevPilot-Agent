@@ -20,21 +20,13 @@ class Settings(BaseSettings):
     debug: bool = Field(default=False, description="Debug mode")
 
     # LLM Settings
-    llm_provider: str = Field(default="ollama", description="LLM provider: ollama, copilot, openai")
+    llm_provider: str = Field(default="freellm", description="LLM provider: freellm, ollama, copilot")
     ollama_host: str = Field(default="http://localhost:11434", description="Ollama server URL")
     ollama_model: str = Field(default="llama3.2:1b", description="Default Ollama model (use :1b for low RAM)")
     embedding_model: str = Field(default="nomic-embed-text", description="Embedding model")
 
     # Copilot Settings
     copilot_timeout: int = Field(default=120, description="Copilot CLI timeout in seconds")
-
-    # OpenAI Settings (for cloud deployment)
-    openai_api_key: str = Field(default="", description="OpenAI API key")
-    openai_model: str = Field(default="gpt-4o-mini", description="OpenAI model to use")
-
-    # Gemini Settings
-    gemini_api_key: str = Field(default="", description="Gemini API key")
-    gemini_model: str = Field(default="gemini-2.5-flash", description="Gemini model to use")
 
     # FreeLLM Settings
     freellm_api_key: str = Field(default="", description="FreeLLM API key")

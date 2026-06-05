@@ -33,6 +33,7 @@ class RegisteredAgent:
     websocket: Any = None
     status: str = "online"
     metadata: Dict = field(default_factory=dict)
+    session_token: str = ""
     # Store pending command responses
     pending_responses: Dict[str, asyncio.Future] = field(default_factory=dict)
 
@@ -73,13 +74,16 @@ class AgentRegistry:
             except Exception as e:
                 logger.warning(f"Error closing old websocket for {did}: {e}")
 
+        import secrets
+        token = secrets.token_hex(32)
         agent = RegisteredAgent(
             device_id=did,
             hostname=hostname,
             platform=platform,
             registered_at=datetime.utcnow().isoformat(),
             websocket=websocket,
-            status="online"
+            status="online",
+            session_token=token
         )
         self.agents[did] = agent
         logger.info(f"Agent registered: {hostname} ({did}) on {platform}")
@@ -168,7 +172,7 @@ class AgentRegistry:
 
             agent.pending_responses[req_id] = response_future
 
-            message = {**payload, "request_id": req_id}
+            message = {**payload, "request_id": req_id, "session_token": agent.session_token}
             await agent.websocket.send_text(json.dumps(message))
 
             try:
@@ -207,6 +211,7 @@ class AgentRegistry:
         timeout: int = 60
     ) -> dict:
         """Send a shell command to an agent and wait for response."""
+        logger.info(f"AUDIT LOG | Target: {device_id} | Command: {command}")
         response = await self.send_agent_request(
             device_id,
             {"type": "execute", "command": command, "timeout": timeout},

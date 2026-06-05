@@ -26,12 +26,7 @@ def _ensure_loaded() -> None:
     except OSError:
         pass
     if _token:
-        try:
-            from jarvis.llm.providers.copilot_api import set_copilot_token
-
-            set_copilot_token(_token)
-        except ImportError:
-            pass
+        pass
 
 
 def get_stored_github_token() -> Optional[str]:
@@ -51,12 +46,6 @@ def save_github_token(token: str, username: str) -> None:
     _USERNAME_FILE.write_text(username, encoding="utf-8")
     _token = token.strip()
     _username = username
-    try:
-        from jarvis.llm.providers.copilot_api import set_copilot_token
-
-        set_copilot_token(_token)
-    except ImportError:
-        pass
 
 
 def clear_github_token() -> None:

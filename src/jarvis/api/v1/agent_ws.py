@@ -62,7 +62,9 @@ async def agent_websocket_endpoint(websocket: WebSocket, device_id: str):
         await websocket.send_text(json.dumps({
             "type": "registered",
             "device_id": did,
-            "message": f"Welcome {hostname}"
+            "message": f"Welcome {hostname}",
+            "session_token": agent.session_token,
+            "capabilities": ["shell", "read_fs", "write_fs", "git", "network"]
         }))
 
         logger.info(f"Agent {hostname} registered successfully")
@@ -85,6 +87,7 @@ async def agent_websocket_endpoint(websocket: WebSocket, device_id: str):
                 "directory_listing",
                 "project_info_result",
                 "telemetry_result",
+                "search_result",
             ]:
                 # Route command / FS / telemetry responses to the registry
                 registry.handle_agent_response(did, message)
@@ -332,6 +335,48 @@ async def agent_fs_info(device_id: str, body: FsInfoBody) -> dict[str, Any]:
         "has_git": bool(raw.get("has_git")),
         "has_package_json": bool(raw.get("has_package_json")),
         "has_requirements": bool(raw.get("has_requirements")),
+        "error": raw.get("error"),
+    }
+
+
+class FsSearchBody(BaseModel):
+    query: str
+    path: str
+    max_results: int = Field(default=50, ge=1, le=500)
+    case_sensitive: bool = False
+    file_pattern: str | None = None
+
+
+@router.post("/agents/{device_id}/fs/search")
+async def agent_fs_search(device_id: str, body: FsSearchBody) -> dict[str, Any]:
+    """Search files on the paired laptop for a text pattern."""
+    registry = get_agent_registry()
+    did = _norm_id(device_id)
+    raw = await registry.send_agent_request(
+        did,
+        {
+            "type": "file_search",
+            "query": body.query,
+            "path": body.path,
+            "max_results": body.max_results,
+            "case_sensitive": body.case_sensitive,
+            "file_pattern": body.file_pattern,
+        },
+        wait_timeout=120,
+    )
+    if raw.get("_offline"):
+        raise _agent_unavailable(
+            "Paired laptop is offline or the agent is not connected."
+        )
+    if not raw.get("success"):
+        return {
+            "results": [],
+            "total_matches": 0,
+            "error": raw.get("error") or "Search failed",
+        }
+    return {
+        "results": raw.get("results") or [],
+        "total_matches": int(raw.get("total_matches") or 0),
         "error": raw.get("error"),
     }
 

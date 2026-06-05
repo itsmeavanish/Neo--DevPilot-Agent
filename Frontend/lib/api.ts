@@ -584,6 +584,141 @@ export async function chatWithAgent(
   });
 }
 
+/**
+ * Stream a chat reply from JARVIS via Server-Sent Events.
+ * Calls the existing /api/v1/agent/chat/stream endpoint.
+ *
+ * @param onChunk  Called for each text chunk as it arrives
+ * @param onDone   Called when the stream finishes, with the full assembled text
+ * @param onError  Called on stream or network error
+ * @returns An abort function to cancel the stream early
+ */
+export function chatWithAgentStream(
+  message: string,
+  history: ChatMessage[] = [],
+  session_id?: string,
+  callbacks?: {
+    onChunk?: (chunk: string) => void;
+    onSessionId?: (sid: string) => void;
+    onDone?: (fullText: string) => void;
+    onError?: (error: string) => void;
+  }
+): () => void {
+  const controller = new AbortController();
+
+  (async () => {
+    try {
+      const headers = await buildHeaders();
+      const res = await fetch(
+        `${configManager.backendUrl}/api/v1/agent/chat/stream`,
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ message, history, session_id }),
+          signal: controller.signal,
+        }
+      );
+
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        callbacks?.onError?.(
+          (errBody as { detail?: string }).detail || `Stream error ${res.status}`
+        );
+        return;
+      }
+
+      const reader = res.body?.getReader();
+      if (!reader) {
+        callbacks?.onError?.('Streaming not supported in this environment');
+        return;
+      }
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let fullText = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const payload = line.slice(6).trim();
+          if (payload === '[DONE]') {
+            callbacks?.onDone?.(fullText);
+            return;
+          }
+          try {
+            const evt = JSON.parse(payload) as {
+              type: string;
+              content?: string;
+              session_id?: string;
+            };
+            if (evt.type === 'session' && evt.session_id) {
+              callbacks?.onSessionId?.(evt.session_id);
+            } else if (evt.type === 'chunk' && evt.content) {
+              fullText += evt.content;
+              callbacks?.onChunk?.(evt.content);
+            } else if (evt.type === 'error') {
+              callbacks?.onError?.(evt.content || 'Unknown streaming error');
+              return;
+            }
+          } catch {
+            // skip malformed JSON lines
+          }
+        }
+      }
+      // If we exited the loop without [DONE], still report what we got
+      if (fullText) {
+        callbacks?.onDone?.(fullText);
+      }
+    } catch (err) {
+      if ((err as Error).name !== 'AbortError') {
+        callbacks?.onError?.(
+          err instanceof Error ? err.message : 'Stream connection failed'
+        );
+      }
+    }
+  })();
+
+  return () => controller.abort();
+}
+
+/**
+ * Search files in a project directory for a text pattern.
+ * Routes through the paired agent when available.
+ */
+export async function searchFiles(
+  query: string,
+  path: string,
+  options?: { max_results?: number; case_sensitive?: boolean; file_pattern?: string }
+): Promise<{
+  results: Array<{
+    file: string;
+    line: number;
+    content: string;
+    match_start: number;
+    match_end: number;
+  }>;
+  total_matches: number;
+  error?: string;
+}> {
+  const agentBase = pairedAgentFsPrefix();
+  try {
+    if (agentBase) {
+      return await apiPost(`${agentBase}/fs/search`, { query, path, ...options });
+    }
+    return await apiPost('/project/search', { query, path, ...options });
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : 'Search failed';
+    return { results: [], total_matches: 0, error: msg };
+  }
+}
+
 export interface CodeReviewResult {
   summary: string;
   issues: Array<{
@@ -651,53 +786,6 @@ export async function getCurrentWorkingDirectory(): Promise<string> {
   return '.';
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// OpenAI / Ollama (env on laptop)
-// ─────────────────────────────────────────────────────────────────────────────
-
-export interface OpenAIConfigResponse {
-  success: boolean;
-  message: string;
-  model?: string;
-}
-
-export async function setOpenAIConfig(
-  apiKey: string,
-  model = 'gpt-4o-mini'
-): Promise<OpenAIConfigResponse> {
-  try {
-    const result = await apiPost<{ success: boolean; message: string }>('/project/ai/keys', {
-      openai_api_key: apiKey,
-      openai_model: model,
-    });
-    if (result.success) {
-      return { success: true, message: 'OpenAI API key configured successfully on server', model };
-    }
-    return { success: false, message: result.message || 'Failed to set OpenAI API key' };
-  } catch (error: unknown) {
-    return {
-      success: false,
-      message: error instanceof Error ? error.message : 'Failed to configure OpenAI',
-    };
-  }
-}
-
-export async function getOpenAIStatus(): Promise<OpenAIConfigResponse> {
-  try {
-    const providers = await getAIProviders();
-    const openaiProvider = providers.providers?.openai;
-    return {
-      success: openaiProvider?.available || false,
-      message: openaiProvider?.message || 'OpenAI not configured',
-    };
-  } catch (error: unknown) {
-    return {
-      success: false,
-      message: error instanceof Error ? error.message : 'Failed to check OpenAI status',
-    };
-  }
-}
-
 
 export interface FreeLLMConfigResponse {
   success: boolean;
@@ -744,48 +832,7 @@ export async function getFreeLLMStatus(): Promise<FreeLLMConfigResponse> {
   }
 }
 
-export interface GeminiConfigResponse {
-  success: boolean;
-  message: string;
-  model?: string;
-}
 
-export async function setGeminiConfig(
-  apiKey: string,
-  model = 'gemini-2.5-flash'
-): Promise<GeminiConfigResponse> {
-  try {
-    const result = await apiPost<{ success: boolean; message: string }>('/project/ai/keys', {
-      gemini_api_key: apiKey,
-      gemini_model: model,
-    });
-    if (result.success) {
-      return { success: true, message: 'Gemini API key configured successfully on server', model };
-    }
-    return { success: false, message: result.message || 'Failed to set Gemini API key' };
-  } catch (error: unknown) {
-    return {
-      success: false,
-      message: error instanceof Error ? error.message : 'Failed to configure Gemini',
-    };
-  }
-}
-
-export async function getGeminiStatus(): Promise<GeminiConfigResponse> {
-  try {
-    const providers = await getAIProviders();
-    const geminiProvider = providers.providers?.gemini;
-    return {
-      success: geminiProvider?.available || false,
-      message: geminiProvider?.message || 'Gemini not configured',
-    };
-  } catch (error: unknown) {
-    return {
-      success: false,
-      message: error instanceof Error ? error.message : 'Failed to check Gemini status',
-    };
-  }
-}
 
 export interface OllamaConfigResponse {
   success: boolean;

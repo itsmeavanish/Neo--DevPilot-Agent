@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -25,6 +25,7 @@ import {
   readFile,
   getAIProviders,
   chatWithAgent,
+  chatWithAgentStream,
   reviewCode,
   type ChatMessage as APIChatMessage,
 } from '@/lib/api';
@@ -76,6 +77,8 @@ export default function ChatScreen() {
   const [currentProvider, setCurrentProvider] = useState<string>('');
   // Conversational session state
   const [sessionId, setSessionId] = useState<string | undefined>(undefined);
+  const [streamingMsgId, setStreamingMsgId] = useState<string | null>(null);
+  const cancelStreamRef = useRef<(() => void) | null>(null);
   const scrollViewRef = useRef<ScrollView>(null);
 
   useEffect(() => {
@@ -95,12 +98,60 @@ export default function ChatScreen() {
     loadProvider();
   }, []);
 
-  const addMessage = (role: Message['role'], content: string, isError = false) => {
+  const addMessage = (role: Message['role'], content: string, isError = false): string => {
+    const id = Date.now().toString() + Math.random().toString(36).slice(2);
     setMessages((prev) => [
       ...prev,
-      { id: Date.now().toString() + Math.random(), role, content, timestamp: new Date(), isError },
+      { id, role, content, timestamp: new Date(), isError },
     ]);
+    return id;
   };
+
+  /** Update an existing message's content (used for streaming). */
+  const updateMessage = useCallback((id: string, updater: (prev: string) => string) => {
+    setMessages((prev) =>
+      prev.map((m) => (m.id === id ? { ...m, content: updater(m.content) } : m))
+    );
+  }, []);
+
+  /** Send a user message and stream the AI response token-by-token. */
+  const sendStreaming = useCallback(
+    (userText: string) => {
+      const msgId = Date.now().toString() + Math.random().toString(36).slice(2);
+      // Add placeholder assistant message
+      setMessages((prev) => [
+        ...prev,
+        { id: msgId, role: 'assistant', content: '', timestamp: new Date(), isError: false },
+      ]);
+      setStreamingMsgId(msgId);
+
+      const cancel = chatWithAgentStream(userText, [], sessionId, {
+        onSessionId: (sid) => {
+          if (!sessionId) setSessionId(sid);
+        },
+        onChunk: (chunk) => {
+          updateMessage(msgId, (prev) => prev + chunk);
+        },
+        onDone: (_fullText) => {
+          setStreamingMsgId(null);
+          setIsLoading(false);
+          cancelStreamRef.current = null;
+        },
+        onError: (err) => {
+          updateMessage(msgId, () => `Error: ${err}`);
+          setMessages((prev) =>
+            prev.map((m) => (m.id === msgId ? { ...m, isError: true } : m))
+          );
+          setStreamingMsgId(null);
+          setIsLoading(false);
+          cancelStreamRef.current = null;
+        },
+      });
+
+      cancelStreamRef.current = cancel;
+    },
+    [sessionId, updateMessage]
+  );
 
   const loadFileContext = async (path: string) => {
     try {
@@ -207,19 +258,14 @@ export default function ChatScreen() {
           }
         }
       } else if (lowerText.startsWith('/chat ') || lowerText.startsWith('chat ')) {
-        // Full conversational AI with server-side history
+        // Full conversational AI with server-side history (streaming)
         const prefixLen = lowerText.startsWith('/chat ') ? 6 : 5;
         const prompt = text.slice(prefixLen).trim();
         if (!prompt) {
           addMessage('assistant', 'Please provide a message after /chat', true);
         } else {
-          const res = await chatWithAgent(prompt, [], sessionId);
-          if (res.error) {
-            addMessage('assistant', `JARVIS Error: ${res.error}`, true);
-          } else {
-            if (!sessionId) setSessionId(res.session_id);
-            addMessage('assistant', res.response);
-          }
+          sendStreaming(prompt);
+          return; // sendStreaming manages isLoading
         }
       } else if (lowerText === '/review' || lowerText === '/review ') {
         // AI code review of the loaded file
@@ -254,19 +300,9 @@ export default function ChatScreen() {
           addMessage('assistant', `Copilot CLI:\n\n${output}`, res.status !== 'success');
         }
       } else {
-        // Natural language → AI (Ollama / Copilot token / OpenAI with auto-fallback)
-        const res = await askAI(
-          text,
-          fileContext?.content,
-          fileContext?.path,
-          fileContext?.language
-        );
-        if (res.error) {
-          addMessage('assistant', res.error, true);
-        } else {
-          const providerLabel = currentProvider ? `[${currentProvider}] ` : '';
-          addMessage('assistant', `${providerLabel}${res.response}`);
-        }
+        // Natural language → streaming AI chat (default path)
+        sendStreaming(text);
+        return; // sendStreaming manages isLoading via callbacks
       }
     } catch (err) {
       addMessage('assistant', `Error: ${err instanceof Error ? err.message : 'Connection failed. Is the backend running?'}`, true);
@@ -327,7 +363,7 @@ export default function ChatScreen() {
             </View>
           </View>
         ))}
-        {isLoading && (
+        {isLoading && !streamingMsgId && (
           <View style={[styles.messageBubble, styles.assistantBubble]}>
             <View style={styles.loadingRow}>
               <ActivityIndicator size="small" color={Colors.primary} />

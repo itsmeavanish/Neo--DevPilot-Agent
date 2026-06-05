@@ -89,6 +89,8 @@ class JarvisAgent:
         self.name = DEVICE_NAME
         self.running = True
         self.ws = None
+        self.session_token = None
+        self.capabilities = []
 
     def log(self, msg, level="INFO"):
         ts = datetime.now().strftime("%H:%M:%S")
@@ -114,6 +116,8 @@ class JarvisAgent:
             response = await asyncio.wait_for(self.ws.recv(), timeout=5)
             data = json.loads(response)
             if data.get("type") == "registered":
+                self.session_token = data.get("session_token")
+                self.capabilities = data.get("capabilities", [])
                 self.log(f"Connected! {data.get('message', '')}", "SUCCESS")
                 return True
             else:
@@ -507,11 +511,162 @@ class JarvisAgent:
             )
         )
 
+    async def _reply_file_search(self, data: dict, request_id: str | None):
+        """Search files for a text pattern using subprocess grep/findstr."""
+        query = (data.get("query") or "").strip()
+        search_path = (data.get("path") or ".").strip()
+        max_results = int(data.get("max_results") or 50)
+        case_sensitive = bool(data.get("case_sensitive", False))
+        file_pattern = data.get("file_pattern")  # e.g. "*.py"
+
+        if not query:
+            await self.ws.send(json.dumps({
+                "type": "search_result",
+                "request_id": request_id,
+                "success": False,
+                "error": "Empty search query",
+                "results": [],
+                "total_matches": 0,
+            }))
+            return
+
+        path = Path(search_path).expanduser()
+        if not path.exists():
+            await self.ws.send(json.dumps({
+                "type": "search_result",
+                "request_id": request_id,
+                "success": False,
+                "error": f"Path not found: {search_path}",
+                "results": [],
+                "total_matches": 0,
+            }))
+            return
+
+        results = []
+        try:
+            # Try ripgrep first, fall back to grep/findstr
+            import shutil as _shutil
+            rg_path = _shutil.which("rg")
+            grep_path = _shutil.which("grep")
+
+            if rg_path:
+                cmd = [rg_path, "--line-number", "--no-heading", "--color=never",
+                       f"--max-count={max_results}"]
+                if not case_sensitive:
+                    cmd.append("--ignore-case")
+                if file_pattern:
+                    cmd.extend(["--glob", file_pattern])
+                cmd.extend([query, str(path)])
+            elif grep_path:
+                cmd = [grep_path, "-rn", "--color=never",
+                       f"--max-count={max_results}"]
+                if not case_sensitive:
+                    cmd.append("-i")
+                if file_pattern:
+                    cmd.extend(["--include", file_pattern])
+                cmd.extend([query, str(path)])
+            elif platform.system() == "Windows":
+                # Fallback: findstr on Windows
+                flags = "/S /N"
+                if not case_sensitive:
+                    flags += " /I"
+                cmd_str = f'findstr {flags} "{query}" "{str(path)}\\*.*"'
+                proc = await asyncio.create_subprocess_shell(
+                    cmd_str,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+                output = stdout.decode("utf-8", errors="replace")
+                for line in output.splitlines()[:max_results]:
+                    # findstr: filename:linenum:content
+                    parts = line.split(":", 2)
+                    if len(parts) >= 3:
+                        results.append({
+                            "file": parts[0],
+                            "line": int(parts[1]) if parts[1].isdigit() else 0,
+                            "content": parts[2].strip(),
+                            "match_start": 0,
+                            "match_end": 0,
+                        })
+                await self.ws.send(json.dumps({
+                    "type": "search_result",
+                    "request_id": request_id,
+                    "success": True,
+                    "results": results,
+                    "total_matches": len(results),
+                }))
+                return
+            else:
+                cmd = ["grep", "-rn", query, str(path)]
+
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+            output = stdout.decode("utf-8", errors="replace")
+
+            for line in output.splitlines()[:max_results]:
+                # rg/grep: filename:linenum:content
+                parts = line.split(":", 2)
+                if len(parts) >= 3:
+                    results.append({
+                        "file": parts[0],
+                        "line": int(parts[1]) if parts[1].isdigit() else 0,
+                        "content": parts[2].strip(),
+                        "match_start": 0,
+                        "match_end": 0,
+                    })
+
+        except asyncio.TimeoutError:
+            await self.ws.send(json.dumps({
+                "type": "search_result",
+                "request_id": request_id,
+                "success": False,
+                "error": "Search timed out after 30s",
+                "results": [],
+                "total_matches": 0,
+            }))
+            return
+        except Exception as e:
+            await self.ws.send(json.dumps({
+                "type": "search_result",
+                "request_id": request_id,
+                "success": False,
+                "error": str(e),
+                "results": [],
+                "total_matches": 0,
+            }))
+            return
+
+        await self.ws.send(json.dumps({
+            "type": "search_result",
+            "request_id": request_id,
+            "success": True,
+            "results": results,
+            "total_matches": len(results),
+        }))
+
     async def handle_message(self, msg):
         try:
             data = json.loads(msg)
             msg_type = data.get("type")
             request_id = data.get("request_id")
+
+            # Authenticate message
+            if data.get("session_token") != self.session_token:
+                self.log(f"Unauthorized message received (invalid token): {msg_type}", "ERROR")
+                # Still reply with an error if there's a request_id
+                if request_id:
+                    await self.ws.send(json.dumps({
+                        "type": "error",
+                        "request_id": request_id,
+                        "success": False,
+                        "error": "Unauthorized: invalid session token"
+                    }))
+                return
 
             if msg_type == "ping":
                 await self.ws.send(json.dumps({"type": "pong", "request_id": request_id}))
@@ -536,6 +691,9 @@ class JarvisAgent:
 
             elif msg_type == "file_write":
                 await self._reply_file_write(data, request_id)
+
+            elif msg_type == "file_search":
+                await self._reply_file_search(data, request_id)
 
             elif msg_type == "telemetry_request":
                 await self._reply_telemetry(request_id)

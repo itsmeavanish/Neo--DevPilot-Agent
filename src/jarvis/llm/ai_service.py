@@ -104,27 +104,6 @@ async def _try_ollama_with_fallbacks(prompt: str, system: str) -> tuple[bool, st
     return False, "Ollama failed. " + "; ".join(errors[:3])
 
 
-async def _try_copilot_api(prompt: str, system: str, context: Optional[str]) -> tuple[bool, str]:
-    try:
-        from jarvis.auth.github_token_store import get_stored_github_token
-        from jarvis.llm.providers.copilot_api import get_copilot_api
-
-        token = get_stored_github_token()
-        if not token:
-            return False, "No GitHub token"
-        api = get_copilot_api()
-        api.set_token(token)
-        available, msg = await api.check_available()
-        if not available:
-            return False, msg
-        text = await api.chat(prompt=prompt, context=context, system_prompt=system)
-        if text.startswith("Error:"):
-            return False, text
-        return True, text
-    except Exception as e:
-        return False, str(e)
-
-
 async def _try_copilot_cli(prompt: str, system: str, context: Optional[str]) -> tuple[bool, str]:
     try:
         from jarvis.llm.providers.copilot_cli import get_copilot_cli
@@ -141,91 +120,45 @@ async def _try_copilot_cli(prompt: str, system: str, context: Optional[str]) -> 
         return False, str(e)
 
 
-async def _try_vscode_copilot(prompt: str, system: str, context: Optional[str]) -> tuple[bool, str]:
-    try:
-        from jarvis.llm.providers.vscode_copilot import get_vscode_copilot
-
-        p = get_vscode_copilot()
-        ok, _ = await p.check_available()
-        if not ok:
-            return False, "VS Code Copilot unavailable"
-        text = await p.chat(prompt=prompt, context=context, system_prompt=system)
-        if text.startswith("Error:"):
-            return False, text
-        return True, text
-    except Exception as e:
-        return False, str(e)
-
-
-async def _try_openai(prompt: str, system: str) -> tuple[bool, str]:
+async def _try_freellm(prompt: str, system: str) -> tuple[bool, str]:
     from jarvis.config import get_settings
 
     settings = get_settings()
-    if not settings.openai_api_key:
-        return False, "OpenAI API key not configured"
+    if not getattr(settings, "freellm_api_key", None):
+        return False, "FreeLLM API key not configured"
     try:
-        from jarvis.llm.providers.openai import OpenAIClient
+        from jarvis.llm.providers.freellm import FreeLLMClient
 
-        client = OpenAIClient(api_key=settings.openai_api_key, model=settings.openai_model)
+        client = FreeLLMClient(api_key=settings.freellm_api_key, base_url=getattr(settings, "freellm_api_url", "http://localhost:3001/v1"))
         if not await client.is_available():
-            return False, "OpenAI API key invalid or expired"
+            return False, "FreeLLM API key invalid or expired"
         text = await client.generate(prompt=prompt, system=system)
         return True, text
     except Exception as e:
         return False, str(e)
 
 
-def _has_openai() -> bool:
+def _has_freellm() -> bool:
     from jarvis.config import get_settings
 
-    return bool((get_settings().openai_api_key or "").strip())
+    return bool((getattr(get_settings(), "freellm_api_key", "") or "").strip())
 
 
-async def _try_gemini(prompt: str, system: str) -> tuple[bool, str]:
-    from jarvis.config import get_settings
-
-    settings = get_settings()
-    if not getattr(settings, "gemini_api_key", None):
-        return False, "Gemini API key not configured"
-    try:
-        from jarvis.llm.providers.gemini import GeminiClient
-
-        client = GeminiClient(api_key=settings.gemini_api_key, model=settings.gemini_model)
-        if not await client.is_available():
-            return False, "Gemini API key invalid or expired"
-        text = await client.generate(prompt=prompt, system=system)
-        return True, text
-    except Exception as e:
-        return False, str(e)
-
-
-def _has_gemini() -> bool:
-    from jarvis.config import get_settings
-
-    return bool((getattr(get_settings(), "gemini_api_key", "") or "").strip())
-
-
-def _provider_chain(preferred: str, has_github_token: bool, has_openai: bool, has_gemini: bool) -> list[str]:
+def _provider_chain(preferred: str, has_github_token: bool, has_freellm: bool) -> list[str]:
     """
     Build provider try-order. Cloud/token providers run before Ollama so OOM does not block chat.
     """
     preferred = (preferred or "auto").lower()
 
     cloud_first = []
-    if has_github_token:
-        cloud_first.append("copilot_api")
-    if has_openai:
-        cloud_first.append("openai")
-    if has_gemini:
-        cloud_first.append("gemini")
-    cloud_first.extend(["copilot_cli", "vscode_copilot"])
+    if has_freellm:
+        cloud_first.append("freellm")
+    cloud_first.extend(["copilot_cli"])
 
-    if preferred == "openai" and has_openai:
-        chain = ["openai", *cloud_first, "ollama"]
-    elif preferred == "gemini" and has_gemini:
-        chain = ["gemini", *cloud_first, "ollama"]
+    if preferred == "freellm" and has_freellm:
+        chain = ["freellm", *cloud_first, "ollama"]
     elif preferred == "copilot":
-        chain = ["copilot_api", "copilot_cli", "vscode_copilot", "openai", "gemini", "ollama"]
+        chain = ["copilot_cli", "freellm", "ollama"]
     elif preferred == "ollama":
         # User asked for Ollama but still try cloud first if configured
         chain = [*cloud_first, "ollama"] if cloud_first else ["ollama", *cloud_first]
@@ -260,23 +193,16 @@ async def generate_chat(
         full_prompt = f"Code context:\n\n```\n{code_context}\n```\n\nQuestion: {prompt}"
 
     has_token = bool(get_stored_github_token())
-    has_openai = _has_openai()
-    has_gemini = _has_gemini()
-    chain = _provider_chain(preferred_provider, has_token, has_openai, has_gemini)
+    has_freellm = _has_freellm()
+    chain = _provider_chain(preferred_provider, has_token, has_freellm)
     errors: list[str] = []
 
     for name in chain:
         try:
-            if name == "copilot_api":
-                ok, text = await _try_copilot_api(full_prompt, system, code_context)
-            elif name in ("copilot_cli", "copilot"):
+            if name in ("copilot_cli", "copilot"):
                 ok, text = await _try_copilot_cli(full_prompt, system, code_context)
-            elif name == "vscode_copilot":
-                ok, text = await _try_vscode_copilot(full_prompt, system, code_context)
-            elif name == "openai":
-                ok, text = await _try_openai(full_prompt, system)
-            elif name == "gemini":
-                ok, text = await _try_gemini(full_prompt, system)
+            elif name == "freellm":
+                ok, text = await _try_freellm(full_prompt, system)
             elif name == "ollama":
                 ok, text = await _try_ollama_with_fallbacks(full_prompt, system)
             else:
@@ -295,9 +221,8 @@ async def generate_chat(
         "No AI provider could answer.\n\n"
         "Quick fix (pick one):\n"
         "1. Settings → GitHub → paste Personal Access Token (Copilot)\n"
-        "2. Settings → OpenAI → API key\n"
-        "3. Settings → Gemini → API key\n"
-        "4. On PC: ollama pull llama3.2:1b → Settings → Ollama model llama3.2:1b\n\n"
+        "2. Settings → FreeLLM → API key\n"
+        "3. On PC: ollama pull llama3.2:1b → Settings → Ollama model llama3.2:1b\n\n"
         "Details:\n" + "\n".join(errors[-5:])
     )
     return "error", hint, errors

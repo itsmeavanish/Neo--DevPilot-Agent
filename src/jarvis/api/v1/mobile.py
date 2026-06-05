@@ -116,6 +116,22 @@ class OpenPathRequest(BaseModel):
     path: str
 
 
+class SearchRequest(BaseModel):
+    """File search request."""
+    query: str
+    path: str
+    max_results: int = 50
+    case_sensitive: bool = False
+    file_pattern: Optional[str] = None
+
+
+class SearchResponse(BaseModel):
+    """Search response."""
+    results: list[dict[str, Any]]
+    total_matches: int
+    error: Optional[str] = None
+
+
 class AIProviderStatus(BaseModel):
     """AI provider status."""
     available: bool
@@ -532,6 +548,91 @@ async def get_project_info(request: ProjectInfoRequest):
     )
 
 
+@router.post("/project/search", response_model=SearchResponse)
+async def search_files(request: SearchRequest):
+    """Search files in the given path for a text pattern."""
+    query = request.query
+    search_path = request.path
+    max_results = request.max_results
+    case_sensitive = request.case_sensitive
+    file_pattern = request.file_pattern or "*.*"
+
+    p = Path(search_path).expanduser().resolve()
+    if not p.exists():
+        return SearchResponse(results=[], total_matches=0, error=f"Path not found: {search_path}")
+
+    results = []
+    try:
+        import shutil
+        rg_path = shutil.which("rg")
+        grep_path = shutil.which("grep")
+
+        cmd = None
+        if rg_path:
+            cmd = [rg_path, "--line-number", "--no-heading", "--color=never", f"--max-count={max_results}"]
+            if not case_sensitive:
+                cmd.append("--ignore-case")
+            if request.file_pattern:
+                cmd.extend(["--glob", request.file_pattern])
+            cmd.extend([query, str(p)])
+        elif grep_path:
+            cmd = [grep_path, "-rn", "--color=never", f"--max-count={max_results}"]
+            if not case_sensitive:
+                cmd.append("-i")
+            if request.file_pattern:
+                cmd.extend(["--include", request.file_pattern])
+            cmd.extend([query, str(p)])
+        
+        if cmd:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+            output = stdout.decode("utf-8", errors="replace")
+            for line in output.splitlines()[:max_results]:
+                parts = line.split(":", 2)
+                if len(parts) >= 3:
+                    results.append({
+                        "file": parts[0],
+                        "line": int(parts[1]) if parts[1].isdigit() else 0,
+                        "content": parts[2].strip(),
+                        "match_start": 0,
+                        "match_end": 0,
+                    })
+        else:
+            # Native Python fallback if neither rg nor grep exist (e.g. windows without tools)
+            count = 0
+            for item in p.rglob(file_pattern):
+                if item.is_file():
+                    try:
+                        text = item.read_text(encoding="utf-8", errors="ignore")
+                        lines = text.splitlines()
+                        for i, line in enumerate(lines):
+                            if (query in line) if case_sensitive else (query.lower() in line.lower()):
+                                results.append({
+                                    "file": str(item),
+                                    "line": i + 1,
+                                    "content": line.strip(),
+                                    "match_start": 0,
+                                    "match_end": 0,
+                                })
+                                count += 1
+                                if count >= max_results:
+                                    break
+                    except Exception:
+                        pass
+                if count >= max_results:
+                    break
+
+        return SearchResponse(results=results, total_matches=len(results))
+
+    except Exception as e:
+        return SearchResponse(results=[], total_matches=0, error=str(e))
+
+
+
 @router.post("/project/open-cursor", response_model=CommandResponse)
 async def open_in_cursor(request: OpenPathRequest):
     """Open path in Cursor IDE."""
@@ -587,31 +688,7 @@ async def _check_ollama_available() -> tuple[bool, str]:
 
 
 async def _check_copilot_available() -> tuple[bool, str]:
-    """Check if GitHub Copilot is available (token API, VS Code, or CLI)."""
-    from jarvis.auth.github_token_store import get_stored_github_token
-
-    token = get_stored_github_token()
-    if token:
-        try:
-            from jarvis.llm.providers.copilot_api import get_copilot_api
-
-            api = get_copilot_api()
-            api.set_token(token)
-            ok, msg = await api.check_available()
-            if ok:
-                return True, f"Copilot API ({msg})"
-        except Exception as e:
-            logger.debug("Copilot API check failed: %s", e)
-
-    try:
-        from jarvis.llm.providers.vscode_copilot import get_vscode_copilot
-        vscode_provider = get_vscode_copilot()
-        vscode_available, vscode_message = await vscode_provider.check_available()
-        if vscode_available:
-            return True, f"VS Code Copilot: {vscode_message}"
-    except Exception as e:
-        logger.debug(f"VS Code Copilot check failed: {e}")
-
+    """Check if GitHub Copilot CLI is available."""
     try:
         from jarvis.llm.providers.copilot_cli import get_copilot_cli
         cli_provider = get_copilot_cli()
@@ -621,50 +698,10 @@ async def _check_copilot_available() -> tuple[bool, str]:
         return (
             False,
             cli_message
-            or "Add GitHub token in Settings, run `gh auth login`, or use OpenAI/Ollama.",
+            or "Run `gh auth login` or use FreeLLM/Ollama.",
         )
     except Exception as e:
         return False, f"Copilot error: {str(e)}"
-
-
-async def _check_openai_available() -> tuple[bool, str]:
-    """Check if OpenAI API is available."""
-    from jarvis.config import get_settings
-    settings = get_settings()
-
-    if not settings.openai_api_key:
-        return False, "OpenAI API key not configured"
-
-    try:
-        from jarvis.llm.providers.openai import OpenAIClient
-        client = OpenAIClient(api_key=settings.openai_api_key, model=settings.openai_model)
-        is_available = await client.is_available()
-        if is_available:
-            return True, f"OpenAI API ({settings.openai_model})"
-        else:
-            return False, "OpenAI API key invalid or expired"
-    except Exception as e:
-        return False, f"OpenAI error: {str(e)}"
-
-
-async def _check_gemini_available() -> tuple[bool, str]:
-    """Check if Gemini API is available."""
-    from jarvis.config import get_settings
-    settings = get_settings()
-
-    if not getattr(settings, "gemini_api_key", None):
-        return False, "Gemini API key not configured"
-
-    try:
-        from jarvis.llm.providers.gemini import GeminiClient
-        client = GeminiClient(api_key=settings.gemini_api_key, model=settings.gemini_model)
-        is_available = await client.is_available()
-        if is_available:
-            return True, f"Gemini API ({settings.gemini_model})"
-        else:
-            return False, "Gemini API key invalid or expired"
-    except Exception as e:
-        return False, f"Gemini error: {str(e)}"
 
 
 
@@ -693,8 +730,6 @@ async def get_ai_providers():
     # Check provider availability
     ollama_available, ollama_message = await _check_ollama_available()
     copilot_available, copilot_message = await _check_copilot_available()
-    openai_available, openai_message = await _check_openai_available()
-    gemini_available, gemini_message = await _check_gemini_available()
     freellm_available, freellm_message = await _check_freellm_available()
 
     providers = {
@@ -707,16 +742,6 @@ async def get_ai_providers():
             available=copilot_available,
             message=copilot_message,
             selected=_current_provider() in ("copilot", "auto")
-        ),
-        "openai": AIProviderStatus(
-            available=openai_available,
-            message=openai_message,
-            selected=_current_provider() in ("openai", "auto")
-        ),
-        "gemini": AIProviderStatus(
-            available=gemini_available,
-            message=gemini_message,
-            selected=_current_provider() in ("gemini", "auto")
         ),
         "freellm": AIProviderStatus(
             available=freellm_available,
@@ -742,7 +767,7 @@ async def set_ai_provider(request: SetProviderRequest):
     """Set the current AI provider."""
     global _current_ai_provider
 
-    valid_providers = ["auto", "ollama", "copilot", "openai", "gemini", "freellm", "cursor"]
+    valid_providers = ["auto", "ollama", "copilot", "freellm", "cursor"]
     if request.provider not in valid_providers:
         return {"success": False, "provider": request.provider, "message": f"Invalid provider. Choose from: {valid_providers}"}
 
@@ -752,14 +777,12 @@ async def set_ai_provider(request: SetProviderRequest):
         return {
             "success": True,
             "provider": "auto",
-            "message": "Auto mode: tries GitHub/OpenAI/Gemini first, then Ollama (small model).",
+            "message": "Auto mode: tries GitHub/FreeLLM first, then Ollama (small model).",
         }
 
     checks = {
         "ollama": _check_ollama_available,
         "copilot": _check_copilot_available,
-        "openai": _check_openai_available,
-        "gemini": _check_gemini_available,
         "freellm": _check_freellm_available,
     }
     if request.provider in checks:
@@ -777,10 +800,6 @@ async def set_ai_provider(request: SetProviderRequest):
 
 
 class AIKeysRequest(BaseModel):
-    openai_api_key: Optional[str] = None
-    openai_model: Optional[str] = None
-    gemini_api_key: Optional[str] = None
-    gemini_model: Optional[str] = None
     freellm_api_key: Optional[str] = None
     freellm_api_url: Optional[str] = None
     freellm_model: Optional[str] = None
@@ -788,19 +807,11 @@ class AIKeysRequest(BaseModel):
 
 @router.post("/project/ai/keys")
 async def save_ai_keys(body: AIKeysRequest):
-    """Save OpenAI and Gemini API keys and models to runtime settings."""
+    """Save FreeLLM API keys and models to runtime settings."""
     from jarvis.runtime_llm import get_runtime_llm, _save
     from jarvis.config import get_settings
     
     runtime = get_runtime_llm()
-    if body.openai_api_key is not None:
-        runtime["openai_api_key"] = body.openai_api_key.strip()
-    if body.openai_model is not None:
-        runtime["openai_model"] = body.openai_model.strip()
-    if body.gemini_api_key is not None:
-        runtime["gemini_api_key"] = body.gemini_api_key.strip()
-    if body.gemini_model is not None:
-        runtime["gemini_model"] = body.gemini_model.strip()
     if body.freellm_api_key is not None:
         runtime["freellm_api_key"] = body.freellm_api_key.strip()
     if body.freellm_api_url is not None:
@@ -814,8 +825,7 @@ async def save_ai_keys(body: AIKeysRequest):
     return {
         "success": True,
         "message": "AI configuration updated on backend server.",
-        "openai_configured": bool(runtime.get("openai_api_key")),
-        "gemini_configured": bool(runtime.get("gemini_api_key")),
+        "freellm_configured": bool(runtime.get("freellm_api_key")),
     }
 
 
@@ -1074,20 +1084,12 @@ async def get_github_auth_status():
     # 1. If we have a token stored on the backend, check if it's valid
     token = get_stored_github_token()
     if token:
-        try:
-            from jarvis.llm.providers.copilot_api import get_copilot_api
-            api = get_copilot_api()
-            api.set_token(token)
-            ok, msg = await api.check_available()
-            if ok:
-                return GitHubAuthStatus(
-                    authenticated=True,
-                    username=get_stored_github_username() or "Copilot User",
-                    message=f"Using GitHub token from Settings ({msg})",
-                    has_token=True,
-                )
-        except Exception as e:
-            logger.debug("GitHub token check failed: %s", e)
+        return GitHubAuthStatus(
+            authenticated=True,
+            username=get_stored_github_username() or "Copilot User",
+            message="Using GitHub token from Settings",
+            has_token=True,
+        )
 
     # 2. If no token stored, or it is invalid, check if there is an active paired agent (laptop)
     reg = get_agent_registry()

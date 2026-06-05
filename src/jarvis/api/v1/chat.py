@@ -27,19 +27,18 @@ logger = get_logger("jarvis.api.chat")
 router = APIRouter()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# In-process session store
+# ─────────────────────────────────────────────────────────────────────────────
+# Session Store
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Maps session_id → list of {"role": ..., "content": ...} dicts
-_sessions: dict[str, list[dict[str, str]]] = {}
+from jarvis.chat.history import (
+    get_or_create_session,
+    get_session_history,
+    add_messages,
+    list_sessions,
+    delete_session
+)
 _MAX_HISTORY = 40  # messages kept per session
-
-
-def _get_or_create_session(session_id: str | None) -> tuple[str, list[dict[str, str]]]:
-    sid = session_id or str(uuid.uuid4())[:12]
-    if sid not in _sessions:
-        _sessions[sid] = []
-    return sid, _sessions[sid]
 
 
 JARVIS_SYSTEM_PROMPT = """You are JARVIS, an elite autonomous developer assistant built on \
@@ -120,17 +119,10 @@ async def _get_llm_client():
     """Build an LLM client from active settings, trying providers in order."""
     settings = get_settings()
 
-    # 1. OpenAI (if key set)
+    # 1. FreeLLM (if key set)
     if getattr(settings, "freellm_api_key", None):
         from jarvis.llm.providers.freellm import FreeLLMClient
         client = FreeLLMClient(api_key=settings.freellm_api_key, base_url=getattr(settings, "freellm_api_url", "http://localhost:3001/v1"))
-        if await client.is_available():
-            return client
-
-    # 1.5 OpenAI (if key set)
-    if settings.openai_api_key:
-        from jarvis.llm.providers.openai import OpenAIClient
-        client = OpenAIClient(api_key=settings.openai_api_key, model=settings.openai_model)
         if await client.is_available():
             return client
 
@@ -181,12 +173,15 @@ async def chat(request: ChatRequest):
     - Client may also pass ``history`` directly (server-side history takes precedence).
     - Falls back through OpenAI → Ollama → Copilot CLI automatically.
     """
-    sid, server_history = _get_or_create_session(request.session_id)
+    sid = get_or_create_session(request.session_id)
+    server_history = get_session_history(sid, limit=_MAX_HISTORY)
 
     # Merge client-provided history with server-side history
     # (if session is new, use client-provided history as seed)
     if not server_history and request.history:
-        server_history.extend([h.model_dump() for h in request.history])
+        client_history = [h.model_dump() for h in request.history]
+        server_history.extend(client_history)
+        add_messages(sid, client_history)
 
     msgs = _build_messages(
         [ChatMessage(**m) for m in server_history],
@@ -212,10 +207,10 @@ async def chat(request: ChatRequest):
     if status != "success":
         return ChatResponse(session_id=sid, response="", error=reply)
 
-    server_history.append({"role": "user", "content": request.message})
-    server_history.append({"role": "assistant", "content": reply})
-    if len(server_history) > _MAX_HISTORY:
-        _sessions[sid] = server_history[-_MAX_HISTORY:]
+    add_messages(sid, [
+        {"role": "user", "content": request.message},
+        {"role": "assistant", "content": reply}
+    ])
 
     return ChatResponse(session_id=sid, response=reply)
 
@@ -227,10 +222,13 @@ async def chat(request: ChatRequest):
 
 async def _sse_generator(request: ChatRequest) -> AsyncIterator[str]:
     """Yield Server-Sent Events for streaming chat."""
-    sid, server_history = _get_or_create_session(request.session_id)
+    sid = get_or_create_session(request.session_id)
+    server_history = get_session_history(sid, limit=_MAX_HISTORY)
 
     if not server_history and request.history:
-        server_history.extend([h.model_dump() for h in request.history])
+        client_history = [h.model_dump() for h in request.history]
+        server_history.extend(client_history)
+        add_messages(sid, client_history)
 
     msgs = _build_messages(
         [ChatMessage(**m) for m in server_history],
@@ -260,10 +258,10 @@ async def _sse_generator(request: ChatRequest) -> AsyncIterator[str]:
             await asyncio.sleep(0)  # yield control
 
         assembled = "".join(full_reply)
-        server_history.append({"role": "user", "content": request.message})
-        server_history.append({"role": "assistant", "content": assembled})
-        if len(server_history) > _MAX_HISTORY:
-            _sessions[sid] = server_history[-_MAX_HISTORY:]
+        add_messages(sid, [
+            {"role": "user", "content": request.message},
+            {"role": "assistant", "content": assembled}
+        ])
 
         yield "data: [DONE]\n\n"
 
@@ -293,6 +291,42 @@ async def chat_stream(request: ChatRequest):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Chat History Management
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/chat/history", summary="List chat sessions")
+async def get_chat_history_sessions():
+    """Returns a list of recent chat sessions."""
+    try:
+        return {"sessions": list_sessions()}
+    except Exception as e:
+        logger.exception("Failed to list chat sessions")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/chat/history/{session_id}", summary="Get chat session history")
+async def get_chat_history(session_id: str):
+    """Returns the full message history for a specific session."""
+    try:
+        return {"session_id": session_id, "messages": get_session_history(session_id, limit=500)}
+    except Exception as e:
+        logger.exception("Failed to get chat history")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/chat/history/{session_id}", summary="Delete chat session")
+async def delete_chat_session(session_id: str):
+    """Deletes a specific chat session."""
+    try:
+        delete_session(session_id)
+        return {"success": True, "session_id": session_id}
+    except Exception as e:
+        logger.exception("Failed to delete chat session")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
