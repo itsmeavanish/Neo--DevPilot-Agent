@@ -60,6 +60,14 @@ class Settings(BaseSettings):
     # Security Settings
     sandbox_enabled: bool = Field(default=True, description="Enable command sandboxing")
     approval_required: bool = Field(default=True, description="Require approval for high-risk ops")
+    hmac_strict: bool = Field(default=False, description="Reject unsigned WebSocket messages from agents")
+
+    # Agent Loop Settings
+    agent_max_steps: int = Field(default=10, description="Max ReAct loop iterations per turn")
+    agent_step_timeout: int = Field(default=60, description="Timeout per tool execution in agent loop")
+
+    # Model Router
+    model_router_enabled: bool = Field(default=True, description="Enable automatic model tier routing")
 
     # Paths
     data_dir: Path = Field(default=Path("./data"), description="Data directory")

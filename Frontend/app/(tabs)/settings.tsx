@@ -187,10 +187,12 @@ export default function SettingsScreen() {
     try {
       const result = await setFreeLLMConfig(freellmKeyInput.trim(), freellmUrlInput.trim());
       if (result.success) {
+        // Auto-activate FreeLLM as the AI provider after successful configuration
+        await setAIProvider('freellm');
         setShowFreellmModal(false);
         setFreellmKeyInput('');
         await loadAIStatus();
-        Alert.alert('Success', result.message);
+        Alert.alert('Success', 'FreeLLM configured and activated as AI provider.');
       } else {
         Alert.alert('Error', result.message);
       }

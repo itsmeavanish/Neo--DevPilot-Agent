@@ -58,21 +58,35 @@ async def agent_websocket_endpoint(websocket: WebSocket, device_id: str):
             websocket=websocket
         )
 
-        # Send confirmation
+        # Send confirmation with HMAC secret for message signing
         await websocket.send_text(json.dumps({
             "type": "registered",
             "device_id": did,
             "message": f"Welcome {hostname}",
             "session_token": agent.session_token,
+            "hmac_secret": agent.hmac_secret,
             "capabilities": ["shell", "read_fs", "write_fs", "git", "network"]
         }))
 
-        logger.info(f"Agent {hostname} registered successfully")
+        logger.info(f"Agent {hostname} registered successfully (HMAC enabled)")
 
         # Main message loop
         while True:
             data = await websocket.receive_text()
             message = json.loads(data)
+
+            # HMAC verification for signed messages
+            if agent.hmac_secret and message.get("_hmac_signature"):
+                from jarvis.security.hmac_auth import verify_message
+                valid, reason = verify_message(message, agent.hmac_secret)
+                if not valid:
+                    logger.warning(f"HMAC verification failed for {hostname}: {reason}")
+                    if reason != "missing_hmac_fields":
+                        continue  # drop messages with bad signatures
+            elif agent.hmac_secret and not message.get("_hmac_signature"):
+                # Backward-compatible: warn but accept unsigned messages during transition
+                logger.debug(f"Unsigned message from {hostname} (HMAC not enforced yet)")
+
             msg_type = message.get("type")
 
             if msg_type == "pong":
@@ -89,14 +103,12 @@ async def agent_websocket_endpoint(websocket: WebSocket, device_id: str):
                 "telemetry_result",
                 "search_result",
             ]:
-                # Route command / FS / telemetry responses to the registry
                 registry.handle_agent_response(did, message)
                 logger.debug(f"Command response from {hostname}")
 
             elif msg_type == "error":
                 error = message.get("error")
                 logger.warning(f"Agent error from {hostname}: {error}")
-                # Also route errors as responses
                 registry.handle_agent_response(did, message)
 
             else:

@@ -2,11 +2,12 @@
 Unified AI chat with provider fallback for mobile / IDE.
 
 Tries cloud/token providers before local Ollama so chat works even when Ollama OOMs.
+Supports both full-response and streaming modes.
 """
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import AsyncIterator, Optional
 
 from jarvis.runtime_llm import (
     DEFAULT_OLLAMA_MODEL,
@@ -228,4 +229,176 @@ async def generate_chat(
     return "error", hint, errors
 
 
-__all__ = ["generate_chat", "OLLAMA_FALLBACK_MODELS", "DEFAULT_OLLAMA_MODEL"]
+async def generate_chat_stream(
+    prompt: str,
+    *,
+    system: str = "You are a helpful AI coding assistant. Provide clear, concise answers.",
+    code_context: Optional[str] = None,
+    preferred_provider: str = "auto",
+    messages: Optional[list[dict[str, str]]] = None,
+    model_override: Optional[str] = None,
+) -> AsyncIterator[str]:
+    """
+    Streaming version of generate_chat. Yields text chunks as they arrive.
+
+    Falls through the provider chain until one works, then streams from it.
+    If all providers fail, yields a single error message.
+    """
+    from jarvis.auth.github_token_store import get_stored_github_token
+
+    full_prompt = prompt
+    if code_context:
+        full_prompt = f"Code context:\n\n```\n{code_context}\n```\n\nQuestion: {prompt}"
+
+    chat_messages = []
+    if messages:
+        chat_messages.extend(messages)
+    chat_messages.append({"role": "user", "content": full_prompt})
+
+    has_token = bool(get_stored_github_token())
+    has_freellm = _has_freellm()
+    chain = _provider_chain(preferred_provider, has_token, has_freellm)
+    errors: list[str] = []
+
+    for name in chain:
+        try:
+            if name == "freellm":
+                async for chunk in _stream_freellm(chat_messages, system, model_override):
+                    yield chunk
+                return
+            elif name == "ollama":
+                async for chunk in _stream_ollama(chat_messages, system, model_override):
+                    yield chunk
+                return
+            elif name in ("copilot_cli", "copilot"):
+                # Copilot doesn't support streaming; fall back to full response
+                ok, text = await _try_copilot_cli(full_prompt, system, code_context)
+                if ok:
+                    yield text
+                    return
+                errors.append(f"{name}: {text}")
+                continue
+        except Exception as e:
+            errors.append(f"{name}: {e}")
+            logger.warning("Streaming provider %s failed: %s", name, e)
+            continue
+
+    yield (
+        "No AI provider could stream a response.\n\n"
+        "Quick fix:\n"
+        "1. Settings → FreeLLM → API key\n"
+        "2. On PC: ollama pull llama3.2:1b\n\n"
+        + "\n".join(errors[-3:])
+    )
+
+
+async def _stream_freellm(
+    messages: list[dict[str, str]], system: str, model: Optional[str] = None
+) -> AsyncIterator[str]:
+    """Stream from FreeLLM provider."""
+    from jarvis.config import get_settings
+    from jarvis.llm.providers.freellm import FreeLLMClient
+
+    settings = get_settings()
+    if not getattr(settings, "freellm_api_key", None):
+        raise LLMConnectionError("FreeLLM API key not configured")
+
+    client = FreeLLMClient(
+        api_key=settings.freellm_api_key,
+        base_url=getattr(settings, "freellm_api_url", "http://localhost:3001/v1"),
+    )
+    if not await client.is_available():
+        raise LLMConnectionError("FreeLLM API unavailable")
+
+    kwargs = {}
+    if model:
+        kwargs["model"] = model
+
+    async for chunk in client.chat_stream(messages=messages, system=system, **kwargs):
+        yield chunk
+
+
+async def _stream_ollama(
+    messages: list[dict[str, str]], system: str, model: Optional[str] = None
+) -> AsyncIterator[str]:
+    """Stream from Ollama provider with fallback models."""
+    from jarvis.llm.providers.ollama import OllamaClient
+
+    host = get_effective_ollama_host()
+    primary = model or get_effective_ollama_model()
+    candidates = [primary]
+    for m in OLLAMA_FALLBACK_MODELS:
+        if m not in candidates:
+            candidates.append(m)
+
+    for candidate_model in candidates:
+        client = OllamaClient(host=host, model=candidate_model)
+        if not await client.is_available():
+            raise LLMConnectionError("Ollama is not running")
+        try:
+            async for chunk in client.chat_stream(
+                messages=messages, system=system, model=candidate_model
+            ):
+                yield chunk
+            return
+        except Exception as e:
+            msg = str(e)
+            if _is_oom_message(msg):
+                logger.info("Ollama OOM on %s, trying next model", candidate_model)
+                continue
+            raise
+
+    raise LLMResponseError("All Ollama models failed (OOM)")
+
+
+async def get_streaming_llm_client(
+    preferred_provider: str = "auto", model: Optional[str] = None
+):
+    """
+    Get an LLM client suitable for the ReAct agent loop (supports .chat()).
+
+    Returns the first available client from the provider chain.
+    """
+    from jarvis.auth.github_token_store import get_stored_github_token
+
+    has_token = bool(get_stored_github_token())
+    has_freellm = _has_freellm()
+    chain = _provider_chain(preferred_provider, has_token, has_freellm)
+
+    for name in chain:
+        try:
+            if name == "freellm":
+                from jarvis.config import get_settings
+                from jarvis.llm.providers.freellm import FreeLLMClient
+
+                settings = get_settings()
+                if not getattr(settings, "freellm_api_key", None):
+                    continue
+                client = FreeLLMClient(
+                    api_key=settings.freellm_api_key,
+                    base_url=getattr(settings, "freellm_api_url", "http://localhost:3001/v1"),
+                    model=model or "auto",
+                )
+                if await client.is_available():
+                    return client
+            elif name == "ollama":
+                from jarvis.llm.providers.ollama import OllamaClient
+
+                host = get_effective_ollama_host()
+                m = model or get_effective_ollama_model()
+                client = OllamaClient(host=host, model=m)
+                if await client.is_available():
+                    return client
+        except Exception:
+            continue
+
+    return None
+
+
+__all__ = [
+    "generate_chat",
+    "generate_chat_stream",
+    "get_streaming_llm_client",
+    "OLLAMA_FALLBACK_MODELS",
+    "DEFAULT_OLLAMA_MODEL",
+]

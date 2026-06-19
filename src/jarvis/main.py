@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from jarvis import __version__
 from jarvis.config import get_settings
 from jarvis.api.v1.router import router as v1_router
-from jarvis.api.v1.mobile import router as mobile_router
+from jarvis.api.v1.mobile.router import router as mobile_router
 from jarvis.api.v1.device_management import router as device_router
 from jarvis.api.middleware.auth import APIKeyMiddleware
 from jarvis.api.middleware.security import SecurityMiddleware, get_rate_limiter

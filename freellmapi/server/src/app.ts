@@ -33,15 +33,14 @@ export function createApp() {
   const app = express();
   const allowedCorsOrigins = getAllowedCorsOrigins();
 
-  // CSP intentionally disabled — the SPA bundles inline styles and the OG
-  // image is loaded from the same origin; enabling helmet's default CSP
-  // breaks the React build's hashed-asset loader. HSTS off because this is
-  // a single-user local proxy, served over HTTP on localhost. Both should
-  // stay disabled unless someone serves the proxy over HTTPS publicly
-  // (which is also not a supported deployment — see README).
   app.use(helmet({ contentSecurityPolicy: false, hsts: false }));
   app.use(cors({
     origin(origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) {
+      // In production, allow all origins (the service is protected by API key, not CORS)
+      if (process.env.NODE_ENV === 'production') {
+        callback(null, true);
+        return;
+      }
       callback(null, !origin || allowedCorsOrigins.has(origin));
     },
   }));

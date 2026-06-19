@@ -34,6 +34,7 @@ class RegisteredAgent:
     status: str = "online"
     metadata: Dict = field(default_factory=dict)
     session_token: str = ""
+    hmac_secret: str = ""
     # Store pending command responses
     pending_responses: Dict[str, asyncio.Future] = field(default_factory=dict)
 
@@ -75,7 +76,10 @@ class AgentRegistry:
                 logger.warning(f"Error closing old websocket for {did}: {e}")
 
         import secrets
+        from jarvis.security.hmac_auth import generate_shared_secret
+
         token = secrets.token_hex(32)
+        hmac_secret = generate_shared_secret()
         agent = RegisteredAgent(
             device_id=did,
             hostname=hostname,
@@ -83,7 +87,8 @@ class AgentRegistry:
             registered_at=datetime.utcnow().isoformat(),
             websocket=websocket,
             status="online",
-            session_token=token
+            session_token=token,
+            hmac_secret=hmac_secret,
         )
         self.agents[did] = agent
         logger.info(f"Agent registered: {hostname} ({did}) on {platform}")

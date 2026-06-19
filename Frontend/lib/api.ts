@@ -609,6 +609,8 @@ export function chatWithAgentStream(
   (async () => {
     try {
       const headers = await buildHeaders();
+
+      // Try streaming first
       const res = await fetch(
         `${configManager.backendUrl}/api/v1/agent/chat/stream`,
         {
@@ -629,7 +631,41 @@ export function chatWithAgentStream(
 
       const reader = res.body?.getReader();
       if (!reader) {
-        callbacks?.onError?.('Streaming not supported in this environment');
+        // React Native doesn't support ReadableStream — fall back to non-streaming
+        // Try to parse the full SSE response as text
+        const text = await res.text();
+        if (text) {
+          _parseSSEText(text, callbacks);
+          return;
+        }
+
+        // If text parsing also fails, use the non-streaming endpoint
+        const fallbackRes = await fetch(
+          `${configManager.backendUrl}/api/v1/agent/chat`,
+          {
+            method: 'POST',
+            headers: await buildHeaders(),
+            body: JSON.stringify({ message, history, session_id }),
+            signal: controller.signal,
+          }
+        );
+        if (!fallbackRes.ok) {
+          const errBody = await fallbackRes.json().catch(() => ({}));
+          callbacks?.onError?.(
+            (errBody as { detail?: string }).detail || `Chat error ${fallbackRes.status}`
+          );
+          return;
+        }
+        const data = await fallbackRes.json() as { session_id: string; response: string; error?: string };
+        if (data.error) {
+          callbacks?.onError?.(data.error);
+          return;
+        }
+        if (data.session_id) callbacks?.onSessionId?.(data.session_id);
+        if (data.response) {
+          callbacks?.onChunk?.(data.response);
+          callbacks?.onDone?.(data.response);
+        }
         return;
       }
 
@@ -672,7 +708,6 @@ export function chatWithAgentStream(
           }
         }
       }
-      // If we exited the loop without [DONE], still report what we got
       if (fullText) {
         callbacks?.onDone?.(fullText);
       }
@@ -686,6 +721,54 @@ export function chatWithAgentStream(
   })();
 
   return () => controller.abort();
+}
+
+/** Parse a complete SSE text response (used when ReadableStream is unavailable). */
+function _parseSSEText(
+  text: string,
+  callbacks?: {
+    onChunk?: (chunk: string) => void;
+    onSessionId?: (sid: string) => void;
+    onDone?: (fullText: string) => void;
+    onError?: (error: string) => void;
+  }
+): void {
+  let fullText = '';
+  const lines = text.split('\n');
+
+  for (const line of lines) {
+    if (!line.startsWith('data: ')) continue;
+    const payload = line.slice(6).trim();
+    if (payload === '[DONE]') {
+      callbacks?.onDone?.(fullText);
+      return;
+    }
+    try {
+      const evt = JSON.parse(payload) as {
+        type: string;
+        content?: string;
+        session_id?: string;
+      };
+      if (evt.type === 'session' && evt.session_id) {
+        callbacks?.onSessionId?.(evt.session_id);
+      } else if ((evt.type === 'chunk' || evt.type === 'token') && evt.content) {
+        fullText += evt.content;
+        callbacks?.onChunk?.(evt.content);
+      } else if (evt.type === 'done' && evt.content) {
+        fullText = evt.content;
+        callbacks?.onDone?.(fullText);
+        return;
+      } else if (evt.type === 'error') {
+        callbacks?.onError?.(evt.content || 'Unknown streaming error');
+        return;
+      }
+    } catch {
+      // skip malformed JSON lines
+    }
+  }
+  if (fullText) {
+    callbacks?.onDone?.(fullText);
+  }
 }
 
 /**

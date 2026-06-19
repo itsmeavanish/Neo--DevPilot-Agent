@@ -81,6 +81,21 @@ def _detect_project_type(p: Path) -> str:
     return "Unknown"
 
 
+def _hmac_sign_message(payload: dict, shared_secret: str) -> dict:
+    """Sign a message with HMAC-SHA256 (inline to avoid import dependencies)."""
+    import hashlib
+    import hmac as _hmac
+    import time as _time
+    timestamp = str(int(_time.time()))
+    filtered = {k: v for k, v in payload.items() if not k.startswith("_hmac_")}
+    canonical = json.dumps(filtered, sort_keys=True, separators=(",", ":"))
+    sign_input = f"{timestamp}.{canonical}"
+    signature = _hmac.new(
+        shared_secret.encode(), sign_input.encode(), hashlib.sha256
+    ).hexdigest()
+    return {**payload, "_hmac_timestamp": timestamp, "_hmac_signature": signature}
+
+
 class JarvisAgent:
     def __init__(self):
         base_url = SERVER_URL.replace("https://", "wss://").replace("http://", "ws://")
@@ -90,6 +105,7 @@ class JarvisAgent:
         self.running = True
         self.ws = None
         self.session_token = None
+        self.hmac_secret = None
         self.capabilities = []
 
     def log(self, msg, level="INFO"):
@@ -117,8 +133,10 @@ class JarvisAgent:
             data = json.loads(response)
             if data.get("type") == "registered":
                 self.session_token = data.get("session_token")
+                self.hmac_secret = data.get("hmac_secret")
                 self.capabilities = data.get("capabilities", [])
-                self.log(f"Connected! {data.get('message', '')}", "SUCCESS")
+                hmac_status = "HMAC enabled" if self.hmac_secret else "no HMAC"
+                self.log(f"Connected! {data.get('message', '')} ({hmac_status})", "SUCCESS")
                 return True
             else:
                 self.log(f"Registration failed: {data}", "ERROR")
@@ -129,6 +147,12 @@ class JarvisAgent:
         except Exception as e:
             self.log(f"Connection failed to {self.ws_url}: {e}", "ERROR")
             return False
+    async def _send(self, payload: dict):
+        """Send a message, signing it with HMAC if secret is available."""
+        if self.hmac_secret:
+            payload = _hmac_sign_message(payload, self.hmac_secret)
+        await self.ws.send(json.dumps(payload))
+
     async def send_status(self):
         status = {
             "type": "status",
@@ -138,7 +162,7 @@ class JarvisAgent:
             "memory_percent": psutil.virtual_memory().percent,
             "timestamp": datetime.utcnow().isoformat(),
         }
-        await self.ws.send(json.dumps(status))
+        await self._send(status)
     async def execute(self, cmd, timeout=120):
         self.log(f"Running: {cmd[:60]}...")
         try:
@@ -170,34 +194,26 @@ class JarvisAgent:
             pass
 
         if not path.exists():
-            await self.ws.send(
-                json.dumps(
-                    {
-                        "type": "directory_listing",
-                        "request_id": request_id,
-                        "success": False,
-                        "error": f"Path not found: {raw}",
-                        "path": raw,
-                        "files": [],
-                        "count": 0,
-                    }
-                )
-            )
+            await self._send({
+                "type": "directory_listing",
+                "request_id": request_id,
+                "success": False,
+                "error": f"Path not found: {raw}",
+                "path": raw,
+                "files": [],
+                "count": 0,
+            })
             return
         if not path.is_dir():
-            await self.ws.send(
-                json.dumps(
-                    {
-                        "type": "directory_listing",
-                        "request_id": request_id,
-                        "success": False,
-                        "error": f"Not a directory: {path}",
-                        "path": str(path),
-                        "files": [],
-                        "count": 0,
-                    }
-                )
-            )
+            await self._send({
+                "type": "directory_listing",
+                "request_id": request_id,
+                "success": False,
+                "error": f"Not a directory: {path}",
+                "path": str(path),
+                "files": [],
+                "count": 0,
+            })
             return
 
         files_out = []
@@ -222,33 +238,25 @@ class JarvisAgent:
                 except (OSError, PermissionError):
                     continue
         except PermissionError:
-            await self.ws.send(
-                json.dumps(
-                    {
-                        "type": "directory_listing",
-                        "request_id": request_id,
-                        "success": False,
-                        "error": "Permission denied",
-                        "path": str(path),
-                        "files": [],
-                        "count": 0,
-                    }
-                )
-            )
+            await self._send({
+                "type": "directory_listing",
+                "request_id": request_id,
+                "success": False,
+                "error": "Permission denied",
+                "path": str(path),
+                "files": [],
+                "count": 0,
+            })
             return
 
-        await self.ws.send(
-            json.dumps(
-                {
-                    "type": "directory_listing",
-                    "request_id": request_id,
-                    "success": True,
-                    "path": str(path),
-                    "files": files_out,
-                    "count": len(files_out),
-                }
-            )
-        )
+        await self._send({
+            "type": "directory_listing",
+            "request_id": request_id,
+            "success": True,
+            "path": str(path),
+            "files": files_out,
+            "count": len(files_out),
+        })
 
     async def _reply_file_read(self, data: dict, request_id: str | None):
         raw = (data.get("path") or "").strip()
@@ -257,9 +265,7 @@ class JarvisAgent:
         path = Path(raw).expanduser()
 
         if not path.exists() or not path.is_file():
-            await self.ws.send(
-                json.dumps(
-                    {
+            await self._send({
                         "type": "file_content",
                         "request_id": request_id,
                         "success": False,
@@ -269,31 +275,23 @@ class JarvisAgent:
                         "language": "text",
                         "size": 0,
                         "error": f"File not found: {raw}",
-                    }
-                )
-            )
+                    })
             return
 
         try:
             size = path.stat().st_size
         except OSError as e:
-            await self.ws.send(
-                json.dumps(
-                    {
+            await self._send({
                         "type": "file_content",
                         "request_id": request_id,
                         "success": False,
                         "path": raw,
                         "error": str(e),
-                    }
-                )
-            )
+                    })
             return
 
         if size > 5 * 1024 * 1024:
-            await self.ws.send(
-                json.dumps(
-                    {
+            await self._send({
                         "type": "file_content",
                         "request_id": request_id,
                         "success": False,
@@ -303,25 +301,19 @@ class JarvisAgent:
                         "language": _detect_language(str(path)),
                         "size": size,
                         "error": "File too large (>5MB)",
-                    }
-                )
-            )
+                    })
             return
 
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError as e:
-            await self.ws.send(
-                json.dumps(
-                    {
+            await self._send({
                         "type": "file_content",
                         "request_id": request_id,
                         "success": False,
                         "path": str(path),
                         "error": str(e),
-                    }
-                )
-            )
+                    })
             return
 
         all_lines = text.splitlines(keepends=True)
@@ -330,9 +322,7 @@ class JarvisAgent:
         if len(all_lines) > max_lines:
             content += f"\n... (truncated, showing {max_lines}/{len(all_lines)} lines)"
 
-        await self.ws.send(
-            json.dumps(
-                {
+        await self._send({
                     "type": "file_content",
                     "request_id": request_id,
                     "success": True,
@@ -341,9 +331,7 @@ class JarvisAgent:
                     "lines": len(all_lines),
                     "language": _detect_language(str(path)),
                     "size": size,
-                }
-            )
-        )
+                })
 
     def _path_write_blocked(self, path: Path) -> str | None:
         norm = str(path).replace("/", "\\").lower()
@@ -367,17 +355,13 @@ class JarvisAgent:
         create_backup = bool(data.get("create_backup", True))
 
         if content is None:
-            await self.ws.send(
-                json.dumps(
-                    {
+            await self._send({
                         "type": "file_result",
                         "request_id": request_id,
                         "success": False,
                         "path": raw,
                         "error": "content is required",
-                    }
-                )
-            )
+                    })
             return
 
         path = Path(raw).expanduser()
@@ -388,17 +372,13 @@ class JarvisAgent:
 
         blocked = self._path_write_blocked(path)
         if blocked:
-            await self.ws.send(
-                json.dumps(
-                    {
+            await self._send({
                         "type": "file_result",
                         "request_id": request_id,
                         "success": False,
                         "path": raw,
                         "error": blocked,
-                    }
-                )
-            )
+                    })
             return
 
         backup_path = None
@@ -413,9 +393,7 @@ class JarvisAgent:
             path.write_text(str(content), encoding="utf-8")
             nbytes = len(str(content).encode("utf-8"))
 
-            await self.ws.send(
-                json.dumps(
-                    {
+            await self._send({
                         "type": "file_result",
                         "request_id": request_id,
                         "success": True,
@@ -423,49 +401,35 @@ class JarvisAgent:
                         "message": "File saved successfully",
                         "backup_path": backup_path,
                         "bytes_written": nbytes,
-                    }
-                )
-            )
+                    })
         except PermissionError:
-            await self.ws.send(
-                json.dumps(
-                    {
+            await self._send({
                         "type": "file_result",
                         "request_id": request_id,
                         "success": False,
                         "path": str(path),
                         "error": "Permission denied",
-                    }
-                )
-            )
+                    })
         except OSError as e:
-            await self.ws.send(
-                json.dumps(
-                    {
+            await self._send({
                         "type": "file_result",
                         "request_id": request_id,
                         "success": False,
                         "path": raw,
                         "error": str(e),
-                    }
-                )
-            )
+                    })
 
     async def _reply_project_info(self, data: dict, request_id: str | None):
         raw = (data.get("path") or "").strip()
         path = Path(raw).expanduser()
         if not path.exists() or not path.is_dir():
-            await self.ws.send(
-                json.dumps(
-                    {
+            await self._send({
                         "type": "project_info_result",
                         "request_id": request_id,
                         "success": False,
                         "path": raw,
                         "error": f"Path not found: {raw}",
-                    }
-                )
-            )
+                    })
             return
 
         p = path
@@ -494,9 +458,7 @@ class JarvisAgent:
         except (OSError, PermissionError):
             pass
 
-        await self.ws.send(
-            json.dumps(
-                {
+        await self._send({
                     "type": "project_info_result",
                     "request_id": request_id,
                     "success": True,
@@ -507,9 +469,7 @@ class JarvisAgent:
                     "has_git": (p / ".git").exists(),
                     "has_package_json": (p / "package.json").exists(),
                     "has_requirements": (p / "requirements.txt").exists() or (p / "pyproject.toml").exists(),
-                }
-            )
-        )
+                })
 
     async def _reply_file_search(self, data: dict, request_id: str | None):
         """Search files for a text pattern using subprocess grep/findstr."""
@@ -520,26 +480,26 @@ class JarvisAgent:
         file_pattern = data.get("file_pattern")  # e.g. "*.py"
 
         if not query:
-            await self.ws.send(json.dumps({
+            await self._send({
                 "type": "search_result",
                 "request_id": request_id,
                 "success": False,
                 "error": "Empty search query",
                 "results": [],
                 "total_matches": 0,
-            }))
+            })
             return
 
         path = Path(search_path).expanduser()
         if not path.exists():
-            await self.ws.send(json.dumps({
+            await self._send({
                 "type": "search_result",
                 "request_id": request_id,
                 "success": False,
                 "error": f"Path not found: {search_path}",
                 "results": [],
                 "total_matches": 0,
-            }))
+            })
             return
 
         results = []
@@ -589,13 +549,13 @@ class JarvisAgent:
                             "match_start": 0,
                             "match_end": 0,
                         })
-                await self.ws.send(json.dumps({
+                await self._send({
                     "type": "search_result",
                     "request_id": request_id,
                     "success": True,
                     "results": results,
                     "total_matches": len(results),
-                }))
+                })
                 return
             else:
                 cmd = ["grep", "-rn", query, str(path)]
@@ -621,33 +581,33 @@ class JarvisAgent:
                     })
 
         except asyncio.TimeoutError:
-            await self.ws.send(json.dumps({
+            await self._send({
                 "type": "search_result",
                 "request_id": request_id,
                 "success": False,
                 "error": "Search timed out after 30s",
                 "results": [],
                 "total_matches": 0,
-            }))
+            })
             return
         except Exception as e:
-            await self.ws.send(json.dumps({
+            await self._send({
                 "type": "search_result",
                 "request_id": request_id,
                 "success": False,
                 "error": str(e),
                 "results": [],
                 "total_matches": 0,
-            }))
+            })
             return
 
-        await self.ws.send(json.dumps({
+        await self._send({
             "type": "search_result",
             "request_id": request_id,
             "success": True,
             "results": results,
             "total_matches": len(results),
-        }))
+        })
 
     async def handle_message(self, msg):
         try:
@@ -660,22 +620,22 @@ class JarvisAgent:
                 self.log(f"Unauthorized message received (invalid token): {msg_type}", "ERROR")
                 # Still reply with an error if there's a request_id
                 if request_id:
-                    await self.ws.send(json.dumps({
+                    await self._send({
                         "type": "error",
                         "request_id": request_id,
                         "success": False,
                         "error": "Unauthorized: invalid session token"
-                    }))
+                    })
                 return
 
             if msg_type == "ping":
-                await self.ws.send(json.dumps({"type": "pong", "request_id": request_id}))
+                await self._send({"type": "pong", "request_id": request_id})
 
             elif msg_type == "execute":
                 result = await self.execute(data.get("command", ""), data.get("timeout", 120))
                 result["type"] = "result"
                 result["request_id"] = request_id
-                await self.ws.send(json.dumps(result))
+                await self._send(result)
 
             elif msg_type == "status_request":
                 await self.send_status()
@@ -735,16 +695,12 @@ class JarvisAgent:
             "platform": platform.system(),
             "top_processes": top,
         }
-        await self.ws.send(
-            json.dumps(
-                {
+        await self._send({
                     "type": "telemetry_result",
                     "request_id": request_id,
                     "success": True,
                     "telemetry": telemetry,
-                }
-            )
-        )
+                })
 
     async def run(self):
         print("\n" + "="*50)
