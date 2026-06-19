@@ -17,6 +17,10 @@ class ModelTier(str, Enum):
     MEDIUM = "medium"
     STRONG = "strong"
     CODE = "code"
+    # Pipeline-specific tiers
+    UNDERSTAND = "understand"
+    PLAN = "plan"
+    IMPLEMENT = "implement"
 
 
 @dataclass
@@ -53,6 +57,22 @@ DEFAULT_TIER_MODELS: dict[ModelTier, list[ModelCandidate]] = {
         ModelCandidate(provider="freellm", model="gpt-4o"),
         ModelCandidate(provider="ollama", model="deepseek-coder-v2"),
     ],
+    # Pipeline tiers — FreeLLM "auto" routes to the best available model.
+    # The FreeLLM server's fallback chain picks from 50+ models ranked by
+    # intelligence/speed, so "auto" already selects optimally per request.
+    # These specific models are hints for when they're available:
+    #   UNDERSTAND: Fast + high-context (Gemini Flash, GPT-OSS) for task analysis
+    #   PLAN: Strong reasoning (DeepSeek V3, Kimi K2) for architecture
+    #   IMPLEMENT: Best coders (Qwen3-Coder, Codestral, DeepSeek-Coder) for execution
+    ModelTier.UNDERSTAND: [
+        ModelCandidate(provider="freellm", model="auto"),
+    ],
+    ModelTier.PLAN: [
+        ModelCandidate(provider="freellm", model="auto"),
+    ],
+    ModelTier.IMPLEMENT: [
+        ModelCandidate(provider="freellm", model="auto"),
+    ],
 }
 
 _TOKEN_LIMITS: dict[ModelTier, int] = {
@@ -60,6 +80,9 @@ _TOKEN_LIMITS: dict[ModelTier, int] = {
     ModelTier.MEDIUM: 4096,
     ModelTier.STRONG: 16384,
     ModelTier.CODE: 8192,
+    ModelTier.UNDERSTAND: 4096,
+    ModelTier.PLAN: 8192,
+    ModelTier.IMPLEMENT: 16384,
 }
 
 _FAST_PATTERNS = [

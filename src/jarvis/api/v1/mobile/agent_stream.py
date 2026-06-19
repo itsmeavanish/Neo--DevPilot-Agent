@@ -3,6 +3,9 @@ Streaming agentic AI endpoint for mobile.
 
 Exposes the ReAct agent loop via Server-Sent Events with typed events
 for real-time tool-calling feedback on the mobile app.
+
+Automatically detects complex tasks and routes them through the multi-model
+pipeline (understand → plan → implement) for better results.
 """
 
 import json
@@ -42,6 +45,7 @@ async def agent_stream(request: AgentStreamRequest):
         from jarvis.llm.ai_service import get_streaming_llm_client
         from jarvis.llm.router import get_model_router
         from jarvis.agent.react_loop import ReactAgentLoop
+        from jarvis.agent.pipeline import PipelineOrchestrator, should_use_pipeline
         from jarvis.tools.registry import tool_registry
 
         try:
@@ -68,41 +72,82 @@ async def agent_stream(request: AgentStreamRequest):
             if request.workspace_root:
                 context["workspace_root"] = request.workspace_root
 
-            agent = ReactAgentLoop(
-                llm_client=llm,
-                registry=tool_registry,
-                max_steps=request.max_steps,
-            )
+            use_pipeline = should_use_pipeline(request.message)
 
-            final_answer = ""
-            async for step in agent.run(request.message, history=history, context=context):
-                if step.type == "thinking":
-                    yield _sse({"type": "thinking", "content": step.content, "step": step.step_number})
-                elif step.type == "tool_call":
-                    yield _sse({
-                        "type": "tool_call",
-                        "tool": step.tool_name,
-                        "args": step.tool_args,
-                        "step": step.step_number,
-                    })
-                elif step.type == "tool_result":
-                    result_preview = step.tool_result
-                    if isinstance(result_preview, dict):
-                        output = result_preview.get("output", "")
-                        if isinstance(output, str) and len(output) > 2000:
-                            result_preview = {**result_preview, "output": output[:2000] + "... (truncated)"}
-                    yield _sse({
-                        "type": "tool_result",
-                        "tool": step.tool_name,
-                        "result": result_preview,
-                        "step": step.step_number,
-                        "duration_ms": step.duration_ms,
-                    })
-                elif step.type == "final_answer":
-                    final_answer = step.content
-                    yield _sse({"type": "token", "content": step.content})
-                elif step.type == "error":
-                    yield _sse({"type": "error", "content": step.content})
+            if use_pipeline:
+                # Multi-model pipeline: understand → plan → implement
+                yield _sse({"type": "pipeline_start", "content": "Using multi-model pipeline: Understand → Plan → Implement"})
+
+                pipeline = PipelineOrchestrator(
+                    llm_client=llm,
+                    registry=tool_registry,
+                    max_steps=request.max_steps,
+                )
+
+                final_answer = ""
+                async for step in pipeline.run(
+                    request.message,
+                    history=history,
+                    context=context,
+                ):
+                    if step.type == "phase_start":
+                        yield _sse({"type": "phase_start", "phase": step.phase, "content": step.content})
+                    elif step.type == "phase_result":
+                        yield _sse({"type": "phase_result", "phase": step.phase, "content": step.content, "model": step.model_used})
+                    elif step.type == "thinking":
+                        yield _sse({"type": "thinking", "content": step.content, "phase": step.phase})
+                    elif step.type == "tool_call":
+                        yield _sse({"type": "tool_call", "tool": step.tool_name, "args": step.tool_args, "phase": step.phase})
+                    elif step.type == "tool_result":
+                        result_preview = step.tool_result
+                        if isinstance(result_preview, dict):
+                            output = result_preview.get("output", "")
+                            if isinstance(output, str) and len(output) > 2000:
+                                result_preview = {**result_preview, "output": output[:2000] + "... (truncated)"}
+                        yield _sse({"type": "tool_result", "tool": step.tool_name, "result": result_preview, "duration_ms": step.duration_ms, "phase": step.phase})
+                    elif step.type == "final_answer":
+                        final_answer = step.content
+                        yield _sse({"type": "token", "content": step.content})
+                    elif step.type == "error":
+                        yield _sse({"type": "error", "content": step.content, "phase": step.phase})
+
+            else:
+                # Simple agent loop for straightforward queries
+                agent = ReactAgentLoop(
+                    llm_client=llm,
+                    registry=tool_registry,
+                    max_steps=request.max_steps,
+                )
+
+                final_answer = ""
+                async for step in agent.run(request.message, history=history, context=context):
+                    if step.type == "thinking":
+                        yield _sse({"type": "thinking", "content": step.content, "step": step.step_number})
+                    elif step.type == "tool_call":
+                        yield _sse({
+                            "type": "tool_call",
+                            "tool": step.tool_name,
+                            "args": step.tool_args,
+                            "step": step.step_number,
+                        })
+                    elif step.type == "tool_result":
+                        result_preview = step.tool_result
+                        if isinstance(result_preview, dict):
+                            output = result_preview.get("output", "")
+                            if isinstance(output, str) and len(output) > 2000:
+                                result_preview = {**result_preview, "output": output[:2000] + "... (truncated)"}
+                        yield _sse({
+                            "type": "tool_result",
+                            "tool": step.tool_name,
+                            "result": result_preview,
+                            "step": step.step_number,
+                            "duration_ms": step.duration_ms,
+                        })
+                    elif step.type == "final_answer":
+                        final_answer = step.content
+                        yield _sse({"type": "token", "content": step.content})
+                    elif step.type == "error":
+                        yield _sse({"type": "error", "content": step.content})
 
             if final_answer:
                 add_messages(sid, [
