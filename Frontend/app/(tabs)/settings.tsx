@@ -58,7 +58,7 @@ export default function SettingsScreen() {
   // Input states
   const [githubTokenInput, setGithubTokenInput] = useState('');
   const [freellmKeyInput, setFreellmKeyInput] = useState('');
-  const [freellmUrlInput, setFreellmUrlInput] = useState('http://localhost:3001/v1');
+  const [freellmUrlInput, setFreellmUrlInput] = useState('https://neo-devpilot-agent.onrender.com/v1');
   const [ollamaHostInput, setOllamaHostInput] = useState('http://localhost:11434');
   const [ollamaModelInput, setOllamaModelInput] = useState('llama3.2:1b');
   const [showServerUrlModal, setShowServerUrlModal] = useState(false);
@@ -618,7 +618,7 @@ export default function SettingsScreen() {
             <Text style={styles.inputLabel}>Server URL</Text>
             <TextInput
               style={styles.modalInput}
-              placeholder="http://localhost:3001/v1"
+              placeholder="https://neo-devpilot-agent.onrender.com/v1"
               placeholderTextColor={Colors.muted}
               value={freellmUrlInput}
               onChangeText={setFreellmUrlInput}

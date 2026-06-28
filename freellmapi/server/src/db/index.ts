@@ -1294,6 +1294,10 @@ function ensureUnifiedKey(db: Database.Database) {
   }
 }
 
+export function getStaticApiKey(): string | undefined {
+  return process.env.FREELLM_STATIC_API_KEY || undefined;
+}
+
 export function getUnifiedApiKey(): string {
   const db = getDb();
   const row = db.prepare("SELECT value FROM settings WHERE key = 'unified_api_key'").get() as { value: string };

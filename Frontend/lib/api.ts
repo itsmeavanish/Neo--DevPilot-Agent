@@ -878,7 +878,7 @@ export interface FreeLLMConfigResponse {
 
 export async function setFreeLLMConfig(
   apiKey: string,
-  apiUrl: string = 'http://localhost:3001/v1',
+  apiUrl: string = 'https://neo-devpilot-agent.onrender.com/v1',
   model = 'auto'
 ): Promise<FreeLLMConfigResponse> {
   try {
