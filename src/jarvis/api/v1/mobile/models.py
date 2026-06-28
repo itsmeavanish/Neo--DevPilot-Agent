@@ -102,12 +102,16 @@ class AIAskRequest(BaseModel):
     file_path: Optional[str] = None
     language: Optional[str] = None
     session_id: Optional[str] = None
+    workspace_root: Optional[str] = None
+    pairing_code: Optional[str] = None
 
 class AIAskStreamRequest(BaseModel):
     prompt: str
     code_context: Optional[str] = None
     file_path: Optional[str] = None
     session_id: Optional[str] = None
+    workspace_root: Optional[str] = None
+    pairing_code: Optional[str] = None
 
 class AIResponse(BaseModel):
     status: str

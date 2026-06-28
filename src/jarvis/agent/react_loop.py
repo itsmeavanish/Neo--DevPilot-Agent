@@ -53,8 +53,19 @@ class AgentStep:
         return d
 
 
-REACT_SYSTEM_PROMPT = """You are JARVIS, an autonomous AI developer assistant with direct tool access.
-You help developers by executing commands, reading/writing files, managing git, and answering questions.
+REACT_SYSTEM_PROMPT = """You are JARVIS, an autonomous AI developer agent. You are BOTH a conversational assistant AND a command executor.
+
+When the user asks a question, you answer it. When the user gives a command (even in natural language), you EXECUTE it using your tools. Never just explain how to do something if you can do it directly.
+
+Examples of commands you should execute (not just explain):
+- "Open my portfolio folder in VS Code" → use vscode tool with open_folder action
+- "Create a new file called app.py" → use write_file or paired_write_file tool
+- "Run npm install" → use run_command or run_paired_command tool
+- "Show me what's in the src folder" → use list_directory or paired_list_directory tool
+- "Open this project in VS Code" → use vscode tool with the workspace_root path
+
+When paired with a remote laptop (pairing_code is set), use paired_* tools to execute on that machine.
+When running locally (no pairing_code), use the direct tools (run_command, vscode, etc.).
 
 ## Available Tools:
 {tools_json}
@@ -69,13 +80,15 @@ You MUST respond in EXACTLY one of these JSON formats (no other text):
 {{"action": "final_answer", "answer": "<your complete response to the user>"}}
 
 ## Rules:
-1. Think step by step. If you need information, call a tool first.
-2. After each tool result, decide if you need more info or can answer.
-3. Never fabricate tool results. Always call the tool to get real data.
-4. Maximum {max_steps} tool calls per turn.
-5. If a tool fails, explain the error and try an alternative approach.
-6. Keep answers concise and actionable.
-7. For file operations, use the actual file paths from the workspace.
+1. ACT FIRST, explain after. If the user's intent implies an action, do it.
+2. Think step by step. If you need information, call a tool first.
+3. After each tool result, decide if you need more info or can answer.
+4. Never fabricate tool results. Always call the tool to get real data.
+5. Maximum {max_steps} tool calls per turn.
+6. If a tool fails, explain the error and try an alternative approach.
+7. Keep answers concise and actionable.
+8. For file operations, use the actual file paths from the workspace.
+9. When the user mentions a folder on their Desktop or a known location, construct the full path (e.g., ~/Desktop/folder-name or C:\\Users\\<user>\\Desktop\\folder-name).
 """
 
 
@@ -99,14 +112,48 @@ class ReactAgentLoop:
         self.max_steps = max_steps
         self.step_timeout = step_timeout
 
-    def _build_system_prompt(self) -> str:
-        """Build system prompt with tool schemas."""
+    def _build_system_prompt(self, context: dict[str, Any] | None = None) -> str:
+        """Build system prompt with tool schemas and optional workspace context."""
         schemas = self.registry.get_schemas_for_llm()
         tools_json = json.dumps(schemas, indent=2)
-        return REACT_SYSTEM_PROMPT.format(
+        prompt = REACT_SYSTEM_PROMPT.format(
             tools_json=tools_json,
             max_steps=self.max_steps,
         )
+
+        ctx = context or {}
+
+        # Add execution environment info
+        workspace_root = ctx.get("workspace_root")
+        pairing_code = ctx.get("pairing_code")
+        if workspace_root or pairing_code:
+            prompt += "\n\n## Execution Environment:"
+            if workspace_root:
+                prompt += f"\n- Workspace root: {workspace_root}"
+            if pairing_code:
+                prompt += f"\n- Connected to paired laptop (use paired_* tools for actions)"
+                # Get platform info from agent registry if available
+                try:
+                    from jarvis.devices.agent_registry import get_agent_registry
+                    registry = get_agent_registry()
+                    agent = registry.agents.get(pairing_code)
+                    if agent:
+                        prompt += f"\n- Platform: {agent.platform}"
+                        prompt += f"\n- Hostname: {agent.hostname}"
+                except Exception:
+                    pass
+            else:
+                import platform as _platform
+                prompt += f"\n- Platform: {_platform.system()} ({_platform.node()})"
+                import os as _os
+                prompt += f"\n- Home directory: {_os.path.expanduser('~')}"
+
+        # Inject workspace folder context so LLM knows the full project structure
+        folder_context = ctx.get("folder_context")
+        if folder_context:
+            prompt += f"\n\n## Workspace Context (auto-gathered):\n{folder_context}\n\nUse this context to understand the project structure. You can read specific files for details."
+
+        return prompt
 
     async def run(
         self,
@@ -123,7 +170,7 @@ class ReactAgentLoop:
             context: Execution context (workspace_root, pairing_code, etc.)
         """
         context = context or {}
-        system_prompt = self._build_system_prompt()
+        system_prompt = self._build_system_prompt(context)
 
         messages = []
         if history:

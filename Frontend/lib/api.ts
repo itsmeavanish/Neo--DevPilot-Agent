@@ -512,6 +512,8 @@ export async function askAI(
     code_context,
     file_path,
     language,
+    workspace_root: configManager.workspaceRoot || undefined,
+    pairing_code: configManager.pairingCode || undefined,
   });
 }
 
@@ -581,6 +583,8 @@ export async function chatWithAgent(
     message,
     history,
     session_id,
+    workspace_root: configManager.workspaceRoot || undefined,
+    pairing_code: configManager.pairingCode || undefined,
   });
 }
 
@@ -616,7 +620,13 @@ export function chatWithAgentStream(
         {
           method: 'POST',
           headers,
-          body: JSON.stringify({ message, history, session_id }),
+          body: JSON.stringify({
+            message,
+            history,
+            session_id,
+            workspace_root: configManager.workspaceRoot || undefined,
+            pairing_code: configManager.pairingCode || undefined,
+          }),
           signal: controller.signal,
         }
       );
@@ -645,7 +655,13 @@ export function chatWithAgentStream(
           {
             method: 'POST',
             headers: await buildHeaders(),
-            body: JSON.stringify({ message, history, session_id }),
+            body: JSON.stringify({
+              message,
+              history,
+              session_id,
+              workspace_root: configManager.workspaceRoot || undefined,
+              pairing_code: configManager.pairingCode || undefined,
+            }),
             signal: controller.signal,
           }
         );

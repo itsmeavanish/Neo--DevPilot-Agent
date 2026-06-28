@@ -211,7 +211,8 @@ class PipelineOrchestrator:
             content="Analyzing your request...",
         )
 
-        understanding = await self._run_understand(user_message, code_context, history)
+        folder_context = context.get("folder_context", "")
+        understanding = await self._run_understand(user_message, code_context, history, folder_context)
 
         yield PipelineStep(
             phase=PipelinePhase.UNDERSTAND,
@@ -242,7 +243,7 @@ class PipelineOrchestrator:
             content="Designing implementation strategy...",
         )
 
-        plan = await self._run_plan(user_message, understanding, code_context)
+        plan = await self._run_plan(user_message, understanding, code_context, folder_context)
 
         yield PipelineStep(
             phase=PipelinePhase.PLAN,
@@ -266,9 +267,12 @@ class PipelineOrchestrator:
         user_message: str,
         code_context: Optional[str],
         history: list[dict[str, str]] | None,
+        folder_context: str = "",
     ) -> dict | str:
         """Phase 1: Analyze the task with a fast comprehension model."""
         prompt_parts = [f"Task: {user_message}"]
+        if folder_context:
+            prompt_parts.append(f"\n{folder_context}")
         if code_context:
             prompt_parts.append(f"\nCode context:\n```\n{code_context}\n```")
         if history:
@@ -298,12 +302,15 @@ class PipelineOrchestrator:
         user_message: str,
         understanding: dict | str,
         code_context: Optional[str],
+        folder_context: str = "",
     ) -> dict | str:
         """Phase 2: Create implementation plan with a reasoning model."""
         prompt_parts = [
             f"Original request: {user_message}",
             f"\nTask analysis:\n{json.dumps(understanding, indent=2) if isinstance(understanding, dict) else understanding}",
         ]
+        if folder_context:
+            prompt_parts.append(f"\n{folder_context}")
         if code_context:
             prompt_parts.append(f"\nRelevant code:\n```\n{code_context[:4000]}\n```")
 

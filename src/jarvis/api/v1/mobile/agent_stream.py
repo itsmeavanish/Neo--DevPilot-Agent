@@ -72,6 +72,19 @@ async def agent_stream(request: AgentStreamRequest):
             if request.workspace_root:
                 context["workspace_root"] = request.workspace_root
 
+            # Gather full workspace context (file tree + metadata)
+            if request.workspace_root:
+                from jarvis.tools.builtin.workspace_context import (
+                    gather_workspace_context,
+                    format_context_for_prompt,
+                )
+                ws_ctx = await gather_workspace_context(
+                    request.workspace_root,
+                    pairing_code=request.pairing_code,
+                )
+                if ws_ctx and not ws_ctx.get("error"):
+                    context["folder_context"] = format_context_for_prompt(ws_ctx)
+
             use_pipeline = should_use_pipeline(request.message)
 
             if use_pipeline:

@@ -161,10 +161,18 @@ async def get_copilot_status():
 async def ask_ai(request: AIAskRequest):
     from jarvis.llm.ai_service import generate_chat
     from jarvis.chat.history import get_or_create_session, get_session_history, add_messages
+    from jarvis.tools.builtin.workspace_context import gather_workspace_context, format_context_for_prompt
 
     system_prompt = "You are a helpful AI coding assistant. Provide clear, concise answers."
     if request.file_path:
         system_prompt += f" The user is editing: {request.file_path}."
+
+    # Gather workspace folder context for full-project awareness
+    if request.workspace_root:
+        ws_ctx = await gather_workspace_context(request.workspace_root, pairing_code=request.pairing_code)
+        folder_str = format_context_for_prompt(ws_ctx)
+        if folder_str:
+            system_prompt += f"\n\n{folder_str}\n\nUse this project structure to give informed answers. Reference specific files when relevant."
 
     sid = get_or_create_session(request.session_id)
     history = get_session_history(sid, limit=20) if request.session_id else []
@@ -195,6 +203,7 @@ async def ask_ai_stream(request: AIAskStreamRequest):
     """Stream AI response via Server-Sent Events."""
     from jarvis.llm.ai_service import generate_chat_stream
     from jarvis.chat.history import get_or_create_session, get_session_history, add_messages
+    from jarvis.tools.builtin.workspace_context import gather_workspace_context, format_context_for_prompt
 
     sid = get_or_create_session(request.session_id)
     history = get_session_history(sid, limit=20) if request.session_id else []
@@ -202,6 +211,13 @@ async def ask_ai_stream(request: AIAskStreamRequest):
     system_prompt = "You are a helpful AI coding assistant. Provide clear, concise answers."
     if request.file_path:
         system_prompt += f" The user is editing: {request.file_path}."
+
+    # Gather workspace folder context
+    if request.workspace_root:
+        ws_ctx = await gather_workspace_context(request.workspace_root, pairing_code=request.pairing_code)
+        folder_str = format_context_for_prompt(ws_ctx)
+        if folder_str:
+            system_prompt += f"\n\n{folder_str}\n\nUse this project structure to give informed answers. Reference specific files when relevant."
 
     messages = [{"role": m["role"], "content": m["content"]} for m in history[-10:]] if history else None
 

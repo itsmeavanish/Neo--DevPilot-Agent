@@ -71,6 +71,8 @@ class ChatRequest(BaseModel):
     history: list[ChatMessage] = Field(default_factory=list, description="Prior turns")
     session_id: str | None = Field(default=None, description="Session ID for server-side history")
     system_prompt: str | None = Field(default=None, description="Override system prompt")
+    workspace_root: str | None = Field(default=None, description="Project workspace root for folder-aware context")
+    pairing_code: str | None = Field(default=None, description="Pairing code for remote laptop access")
 
     model_config = {
         "json_schema_extra": {
@@ -192,6 +194,15 @@ async def chat(request: ChatRequest):
     from jarvis.runtime_llm import get_effective_ai_provider
 
     system = request.system_prompt or JARVIS_SYSTEM_PROMPT
+
+    # Inject workspace folder context for full-project awareness
+    if request.workspace_root:
+        from jarvis.tools.builtin.workspace_context import gather_workspace_context, format_context_for_prompt
+        ws_ctx = await gather_workspace_context(request.workspace_root, pairing_code=request.pairing_code)
+        folder_str = format_context_for_prompt(ws_ctx)
+        if folder_str:
+            system += f"\n\n{folder_str}\n\nUse this project structure to give informed, file-specific answers."
+
     # Flatten recent history into prompt for providers that use single-shot generate
     history_blob = ""
     for m in msgs[:-1]:
@@ -221,7 +232,17 @@ async def chat(request: ChatRequest):
 
 
 async def _sse_generator(request: ChatRequest) -> AsyncIterator[str]:
-    """Yield Server-Sent Events for streaming chat."""
+    """
+    Yield Server-Sent Events for streaming chat.
+
+    Routes through the ReAct agent loop so natural-language commands
+    (e.g. "open my project in VS Code") are executed as actions,
+    while regular questions are answered conversationally.
+    """
+    from jarvis.llm.ai_service import get_streaming_llm_client
+    from jarvis.agent.react_loop import ReactAgentLoop
+    from jarvis.tools.registry import tool_registry
+
     sid = get_or_create_session(request.session_id)
     server_history = get_session_history(sid, limit=_MAX_HISTORY)
 
@@ -230,38 +251,69 @@ async def _sse_generator(request: ChatRequest) -> AsyncIterator[str]:
         server_history.extend(client_history)
         add_messages(sid, client_history)
 
-    msgs = _build_messages(
-        [ChatMessage(**m) for m in server_history],
-        request.message,
-    )
-
     # Send session_id first
     yield f"data: {json.dumps({'type': 'session', 'session_id': sid})}\n\n"
 
-    llm = await _get_llm_client()
+    llm = await get_streaming_llm_client(preferred_provider="auto")
     if llm is None:
         error_msg = (
             "No LLM provider available. "
-            "Start Ollama ('ollama serve') or set JARVIS_OPENAI_API_KEY."
+            "Configure FreeLLM or Ollama in Settings."
         )
         yield f"data: {json.dumps({'type': 'error', 'content': error_msg})}\n\n"
         yield "data: [DONE]\n\n"
         return
 
-    system = request.system_prompt or JARVIS_SYSTEM_PROMPT
-    full_reply: list[str] = []
+    # Build execution context
+    context: dict[str, Any] = {}
+    if request.workspace_root:
+        context["workspace_root"] = request.workspace_root
+    if request.pairing_code:
+        context["pairing_code"] = request.pairing_code
 
+    # Gather folder context for project awareness
+    if request.workspace_root:
+        from jarvis.tools.builtin.workspace_context import gather_workspace_context, format_context_for_prompt
+        ws_ctx = await gather_workspace_context(request.workspace_root, pairing_code=request.pairing_code)
+        folder_str = format_context_for_prompt(ws_ctx)
+        if folder_str:
+            context["folder_context"] = folder_str
+
+    # Use the ReAct agent loop — chat IS the command interface
+    history = [{"role": m.role, "content": m.content} for m in
+               [ChatMessage(**m) for m in server_history]]
+
+    agent = ReactAgentLoop(
+        llm_client=llm,
+        registry=tool_registry,
+        max_steps=8,
+    )
+
+    final_answer = ""
     try:
-        async for chunk in llm.chat_stream(messages=msgs, system=system):
-            full_reply.append(chunk)
-            yield f"data: {json.dumps({'type': 'chunk', 'content': chunk})}\n\n"
-            await asyncio.sleep(0)  # yield control
+        async for step in agent.run(request.message, history=history[-10:], context=context):
+            if step.type == "thinking":
+                yield f"data: {json.dumps({'type': 'thinking', 'content': step.content})}\n\n"
+            elif step.type == "tool_call":
+                yield f"data: {json.dumps({'type': 'tool_call', 'tool': step.tool_name, 'args': step.tool_args})}\n\n"
+            elif step.type == "tool_result":
+                result_preview = step.tool_result
+                if isinstance(result_preview, dict):
+                    output = result_preview.get("output", "")
+                    if isinstance(output, str) and len(output) > 2000:
+                        result_preview = {**result_preview, "output": output[:2000] + "... (truncated)"}
+                yield f"data: {json.dumps({'type': 'tool_result', 'tool': step.tool_name, 'result': result_preview}, default=str)}\n\n"
+            elif step.type == "final_answer":
+                final_answer = step.content
+                yield f"data: {json.dumps({'type': 'chunk', 'content': step.content})}\n\n"
+            elif step.type == "error":
+                yield f"data: {json.dumps({'type': 'error', 'content': step.content})}\n\n"
 
-        assembled = "".join(full_reply)
-        add_messages(sid, [
-            {"role": "user", "content": request.message},
-            {"role": "assistant", "content": assembled}
-        ])
+        if final_answer:
+            add_messages(sid, [
+                {"role": "user", "content": request.message},
+                {"role": "assistant", "content": final_answer}
+            ])
 
         yield "data: [DONE]\n\n"
 
