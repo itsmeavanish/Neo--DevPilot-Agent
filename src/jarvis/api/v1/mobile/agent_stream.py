@@ -72,6 +72,18 @@ async def agent_stream(request: AgentStreamRequest):
             if request.workspace_root:
                 context["workspace_root"] = request.workspace_root
 
+            # Set pairing context so paired_* tools can access the pairing code
+            from jarvis.execution_context import set_pairing_context, clear_pairing_context
+            from jarvis.security.policy import Capability
+            all_caps = [c.value for c in Capability]
+            pairing_tokens = None
+            if request.pairing_code:
+                pairing_tokens = set_pairing_context(
+                    request.pairing_code,
+                    capabilities=all_caps,
+                    workspace_root=request.workspace_root,
+                )
+
             # Gather full workspace context (file tree + metadata)
             if request.workspace_root:
                 from jarvis.tools.builtin.workspace_context import (
@@ -175,6 +187,9 @@ async def agent_stream(request: AgentStreamRequest):
             logger.exception("Agent stream error")
             yield _sse({"type": "error", "content": str(e)})
             yield "data: [DONE]\n\n"
+        finally:
+            if pairing_tokens:
+                clear_pairing_context(pairing_tokens)
 
     return StreamingResponse(
         event_generator(),

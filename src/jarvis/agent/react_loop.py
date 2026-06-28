@@ -22,6 +22,20 @@ from jarvis.tools.registry import ToolRegistry, tool_registry
 logger = get_logger("jarvis.agent.react_loop")
 
 
+def _infer_home_dir(workspace_root: str) -> str | None:
+    """Infer user home directory from a workspace path like C:\\Users\\Name\\... or /home/name/..."""
+    import re
+    # Windows: C:\Users\Username\...
+    m = re.match(r"([A-Za-z]:\\Users\\[^\\]+)", workspace_root)
+    if m:
+        return m.group(1)
+    # Linux/Mac: /home/username/... or /Users/username/...
+    m = re.match(r"(/(?:home|Users)/[^/]+)", workspace_root)
+    if m:
+        return m.group(1)
+    return None
+
+
 @dataclass
 class AgentStep:
     """One step in the ReAct loop."""
@@ -57,15 +71,22 @@ REACT_SYSTEM_PROMPT = """You are JARVIS, an autonomous AI developer agent. You a
 
 When the user asks a question, you answer it. When the user gives a command (even in natural language), you EXECUTE it using your tools. Never just explain how to do something if you can do it directly.
 
-Examples of commands you should execute (not just explain):
-- "Open my portfolio folder in VS Code" → use vscode tool with open_folder action
-- "Create a new file called app.py" → use write_file or paired_write_file tool
-- "Run npm install" → use run_command or run_paired_command tool
-- "Show me what's in the src folder" → use list_directory or paired_list_directory tool
-- "Open this project in VS Code" → use vscode tool with the workspace_root path
+## CRITICAL: You run on a CLOUD SERVER, NOT the user's laptop.
+You do NOT have VS Code, desktop folders, or local tools. ALL actions that affect the user's machine MUST go through paired_* tools or run_paired_command.
 
-When paired with a remote laptop (pairing_code is set), use paired_* tools to execute on that machine.
-When running locally (no pairing_code), use the direct tools (run_command, vscode, etc.).
+Examples of commands you should execute:
+- "Open my portfolio folder in VS Code" → run_paired_command with: code "C:\\Users\\<user>\\Desktop\\portfolio"
+- "Open Semester 5 in VS Code" → run_paired_command with: code "C:\\Users\\<user>\\Desktop\\Semester 5"
+- "Create a new file called app.py" → paired_write_file tool
+- "Run npm install" → run_paired_command tool
+- "Show me what's in the src folder" → paired_list_directory tool
+- "Open this project in VS Code" → run_paired_command with: code "<workspace_root>"
+
+## Tool Selection Rules:
+- ALWAYS use run_paired_command for: opening VS Code, running shell commands, launching apps
+- ALWAYS use paired_read_file / paired_write_file for: reading/writing files
+- ALWAYS use paired_list_directory for: browsing folders
+- NEVER use local tools (vscode, run_command, read_file, write_file, list_directory) — those run on the cloud server which has nothing useful
 
 ## Available Tools:
 {tools_json}
@@ -88,7 +109,7 @@ You MUST respond in EXACTLY one of these JSON formats (no other text):
 6. If a tool fails, explain the error and try an alternative approach.
 7. Keep answers concise and actionable.
 8. For file operations, use the actual file paths from the workspace.
-9. When the user mentions a folder on their Desktop or a known location, construct the full path (e.g., ~/Desktop/folder-name or C:\\Users\\<user>\\Desktop\\folder-name).
+9. When the user mentions a folder on their Desktop or a known location, construct the full path using info from the Execution Environment section below.
 """
 
 
@@ -130,13 +151,17 @@ class ReactAgentLoop:
             prompt += "\n\n## Execution Environment:"
             if workspace_root:
                 prompt += f"\n- Workspace root: {workspace_root}"
+                # Infer user home and Desktop from workspace path
+                home_dir = _infer_home_dir(workspace_root)
+                if home_dir:
+                    prompt += f"\n- User home directory: {home_dir}"
+                    prompt += f"\n- Desktop path: {home_dir}\\Desktop" if "\\" in workspace_root else f"\n- Desktop path: {home_dir}/Desktop"
             if pairing_code:
-                prompt += f"\n- Connected to paired laptop (use paired_* tools for actions)"
-                # Get platform info from agent registry if available
+                prompt += f"\n- Connected to paired laptop (use paired_* tools and run_paired_command)"
                 try:
                     from jarvis.devices.agent_registry import get_agent_registry
-                    registry = get_agent_registry()
-                    agent = registry.agents.get(pairing_code)
+                    agent_reg = get_agent_registry()
+                    agent = agent_reg.agents.get(pairing_code)
                     if agent:
                         prompt += f"\n- Platform: {agent.platform}"
                         prompt += f"\n- Hostname: {agent.hostname}"

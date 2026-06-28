@@ -279,6 +279,18 @@ async def _sse_generator(request: ChatRequest) -> AsyncIterator[str]:
         if folder_str:
             context["folder_context"] = folder_str
 
+    # Set pairing context so paired_* tools can access the pairing code
+    from jarvis.execution_context import set_pairing_context, clear_pairing_context
+    from jarvis.security.policy import Capability
+    all_caps = [c.value for c in Capability]
+    pairing_tokens = None
+    if request.pairing_code:
+        pairing_tokens = set_pairing_context(
+            request.pairing_code,
+            capabilities=all_caps,
+            workspace_root=request.workspace_root,
+        )
+
     # Use the ReAct agent loop — chat IS the command interface
     history = [{"role": m.role, "content": m.content} for m in
                [ChatMessage(**m) for m in server_history]]
@@ -321,6 +333,9 @@ async def _sse_generator(request: ChatRequest) -> AsyncIterator[str]:
         logger.exception("Streaming chat error")
         yield f"data: {json.dumps({'type': 'error', 'content': 'An internal error occurred. Please try again.'})}\n\n"
         yield "data: [DONE]\n\n"
+    finally:
+        if pairing_tokens:
+            clear_pairing_context(pairing_tokens)
 
 
 @router.post("/chat/stream", summary="Stream a chat reply via Server-Sent Events")
