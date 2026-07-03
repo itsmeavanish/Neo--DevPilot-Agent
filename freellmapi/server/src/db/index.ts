@@ -1286,6 +1286,20 @@ function migrateModelsV15(db: Database.Database) {
 }
 
 function ensureUnifiedKey(db: Database.Database) {
+  const staticKey = process.env.FREELLM_STATIC_API_KEY;
+  if (staticKey) {
+    // Static key is set — use it as the permanent unified key.
+    // Upsert into DB so getUnifiedApiKey() always returns the static key.
+    const existing = db.prepare("SELECT value FROM settings WHERE key = 'unified_api_key'").get() as { value: string } | undefined;
+    if (!existing) {
+      db.prepare("INSERT INTO settings (key, value) VALUES ('unified_api_key', ?)").run(staticKey);
+    } else if (existing.value !== staticKey) {
+      db.prepare("UPDATE settings SET value = ? WHERE key = 'unified_api_key'").run(staticKey);
+    }
+    console.log(`\n  Using permanent static API key (from FREELLM_STATIC_API_KEY env var)\n`);
+    return;
+  }
+  // No static key — generate one and persist in DB (will be lost on ephemeral filesystems).
   const existing = db.prepare("SELECT value FROM settings WHERE key = 'unified_api_key'").get() as { value: string } | undefined;
   if (!existing) {
     const key = `freellmapi-${crypto.randomBytes(24).toString('hex')}`;
@@ -1298,6 +1312,11 @@ export function getStaticApiKey(): string | undefined {
   return process.env.FREELLM_STATIC_API_KEY || undefined;
 }
 
+export function getPermanentApiKey(): string {
+  // Returns the permanent key: static env var if set, otherwise the DB-stored unified key.
+  return process.env.FREELLM_STATIC_API_KEY || getUnifiedApiKey();
+}
+
 export function getUnifiedApiKey(): string {
   const db = getDb();
   const row = db.prepare("SELECT value FROM settings WHERE key = 'unified_api_key'").get() as { value: string };
@@ -1305,6 +1324,10 @@ export function getUnifiedApiKey(): string {
 }
 
 export function regenerateUnifiedKey(): string {
+  if (process.env.FREELLM_STATIC_API_KEY) {
+    // Cannot regenerate when using a permanent static key
+    return process.env.FREELLM_STATIC_API_KEY;
+  }
   const db = getDb();
   const key = `freellmapi-${crypto.randomBytes(24).toString('hex')}`;
   db.prepare("UPDATE settings SET value = ? WHERE key = 'unified_api_key'").run(key);

@@ -27,6 +27,7 @@ import {
   clearGitHubToken,
   getFreeLLMStatus,
   setFreeLLMConfig,
+  autoConfigureFreeLLM,
   getOllamaStatus,
   setOllamaConfig,
   getOllamaModels,
@@ -102,7 +103,15 @@ export default function SettingsScreen() {
       setCopilotModels(models);
 
       // Get other provider statuses
-      const freellmStat = await getFreeLLMStatus();
+      let freellmStat = await getFreeLLMStatus();
+
+      // Auto-configure FreeLLM with permanent device key if not already configured
+      if (!freellmStat.success) {
+        const autoResult = await autoConfigureFreeLLM();
+        if (autoResult.success) {
+          freellmStat = await getFreeLLMStatus();
+        }
+      }
       setFreellmStatus(freellmStat);
 
       const ollamaStat = await getOllamaStatus();
@@ -201,7 +210,21 @@ export default function SettingsScreen() {
     }
   };
 
-
+  const handleFreellmAutoConfig = async () => {
+    try {
+      const result = await autoConfigureFreeLLM();
+      if (result.success) {
+        await setAIProvider('freellm');
+        setShowFreellmModal(false);
+        await loadAIStatus();
+        Alert.alert('Success', 'FreeLLM auto-configured with permanent device key.');
+      } else {
+        Alert.alert('Error', result.message);
+      }
+    } catch (error: any) {
+      Alert.alert('Error', error.message || 'Failed to auto-configure FreeLLM');
+    }
+  };
 
   const handleOllamaConfig = async () => {
     try {
@@ -603,8 +626,12 @@ export default function SettingsScreen() {
               </TouchableOpacity>
             </View>
             <Text style={styles.modalDescription}>
-              Enter your FreeLLM API key and server URL to use it as an AI provider.
+              Tap "Auto Configure" to get a permanent device key, or enter one manually.
             </Text>
+            <TouchableOpacity style={[styles.modalButton, { marginBottom: 16, backgroundColor: Colors.green }]} onPress={handleFreellmAutoConfig}>
+              <Text style={styles.modalButtonText}>Auto Configure (Recommended)</Text>
+            </TouchableOpacity>
+            <Text style={[styles.inputLabel, { textAlign: 'center', marginBottom: 8 }]}>— or enter manually —</Text>
             <TextInput
               style={styles.modalInput}
               placeholder="freellmapi-..."

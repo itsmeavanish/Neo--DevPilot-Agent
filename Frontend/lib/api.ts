@@ -931,6 +931,32 @@ export async function getFreeLLMStatus(): Promise<FreeLLMConfigResponse> {
   }
 }
 
+const FREELLM_BASE_URL = 'https://neo-devpilot-agent.onrender.com/v1';
+
+/**
+ * Fetches the permanent device API key from the FreeLLM server and
+ * auto-configures it on the Jarvis backend. Call this once on app startup
+ * to ensure the device always has a valid, permanent key.
+ */
+export async function autoConfigureFreeLLM(): Promise<FreeLLMConfigResponse> {
+  try {
+    const resp = await fetch(`${FREELLM_BASE_URL}/device-key`);
+    if (!resp.ok) {
+      return { success: false, message: 'Failed to fetch device key from FreeLLM server' };
+    }
+    const data = await resp.json() as { apiKey: string; permanent: boolean };
+    if (!data.apiKey) {
+      return { success: false, message: 'FreeLLM server returned empty key' };
+    }
+    return await setFreeLLMConfig(data.apiKey, FREELLM_BASE_URL, 'auto');
+  } catch (error: unknown) {
+    return {
+      success: false,
+      message: error instanceof Error ? error.message : 'Failed to auto-configure FreeLLM',
+    };
+  }
+}
+
 
 
 export interface OllamaConfigResponse {

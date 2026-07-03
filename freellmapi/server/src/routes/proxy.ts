@@ -5,7 +5,7 @@ import { z } from 'zod';
 import type { ChatMessage } from '@freellmapi/shared/types.js';
 import { routeRequest, recordRateLimitHit, recordSuccess, type RouteResult } from '../services/router.js';
 import { recordRequest, recordTokens, setCooldown, getNextCooldownDuration } from '../services/ratelimit.js';
-import { getDb, getUnifiedApiKey, getStaticApiKey } from '../db/index.js';
+import { getDb, getUnifiedApiKey, getStaticApiKey, getPermanentApiKey } from '../db/index.js';
 import { contentToString } from '../lib/content.js';
 
 export const proxyRouter = Router();
@@ -226,6 +226,12 @@ export function isRetryableError(err: any): boolean {
     // a bare "400" which is deliberately non-retryable for validation errors.
     || msg.includes('api error 400');
 }
+
+// Public endpoint: returns the permanent API key for device authentication.
+// Devices call this once to get their key and store it forever.
+proxyRouter.get('/device-key', (_req: Request, res: Response) => {
+  res.json({ apiKey: getPermanentApiKey(), permanent: true });
+});
 
 proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
   const start = Date.now();
