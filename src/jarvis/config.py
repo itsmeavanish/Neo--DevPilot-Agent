@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     copilot_timeout: int = Field(default=120, description="Copilot CLI timeout in seconds")
 
     # FreeLLM Settings
-    freellm_api_key: str = Field(default="", description="FreeLLM API key")
+    freellm_api_key: str = Field(default="freellmapi-a6c26527f892a3d3f1041fbd3cf0bc459906a0307f79a537", description="FreeLLM API key")
     freellm_api_url: str = Field(default="https://neo-devpilot-agent.onrender.com/v1", description="FreeLLM API base URL")
     freellm_model: str = Field(default="auto", description="FreeLLM model to use")
 
