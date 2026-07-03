@@ -212,6 +212,10 @@ export function isRetryableError(err: any): boolean {
     || msg.includes('econnrefused') || msg.includes('econnreset')
     || msg.includes('503') || msg.includes('unavailable')
     || msg.includes('500') || msg.includes('internal server error')
+    // 401/403: provider API key expired or revoked — skip to next model.
+    // This is critical for multi-provider setups where one key dies but others work.
+    || msg.includes('401') || msg.includes('unauthorized')
+    || msg.includes('403') || msg.includes('forbidden')
     // 413: this model's payload limit is too small for the request, but another
     // provider in the fallback chain may have a larger limit. Same reasoning as 503.
     || msg.includes('413') || msg.includes('payload too large') || msg.includes('request body too large')

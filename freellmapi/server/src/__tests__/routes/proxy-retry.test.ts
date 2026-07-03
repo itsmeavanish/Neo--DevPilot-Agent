@@ -46,11 +46,14 @@ describe('isRetryableError', () => {
       expect(isRetryableError(new Error('ECONNREFUSED'))).toBe(true);
     });
 
-    it('4xx auth/validation errors are NOT retryable', () => {
-      expect(isRetryableError(new Error('401 Unauthorized'))).toBe(false);
-      expect(isRetryableError(new Error('403 Forbidden'))).toBe(false);
+    it('401/403 auth errors ARE retryable (skip to next provider)', () => {
+      expect(isRetryableError(new Error('401 Unauthorized'))).toBe(true);
+      expect(isRetryableError(new Error('403 Forbidden'))).toBe(true);
+      expect(isRetryableError(new Error('GitHub Models API error 401: Unauthorized'))).toBe(true);
+    });
+
+    it('400 validation errors are NOT retryable (unless api error 400)', () => {
       expect(isRetryableError(new Error('400 Bad Request'))).toBe(false);
-      expect(isRetryableError(new Error('Invalid API key'))).toBe(false);
     });
   });
 });
