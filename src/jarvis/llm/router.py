@@ -41,21 +41,16 @@ class ModelCandidate:
 
 DEFAULT_TIER_MODELS: dict[ModelTier, list[ModelCandidate]] = {
     ModelTier.FAST: [
-        ModelCandidate(provider="freellm", model="gpt-4o-mini"),
-        ModelCandidate(provider="ollama", model="llama3.2:1b"),
+        ModelCandidate(provider="freellm", model="auto"),
     ],
     ModelTier.MEDIUM: [
-        ModelCandidate(provider="freellm", model="gpt-4o"),
-        ModelCandidate(provider="ollama", model="llama3.2:1b"),
+        ModelCandidate(provider="freellm", model="auto"),
     ],
     ModelTier.STRONG: [
-        ModelCandidate(provider="freellm", model="claude-sonnet-4-20250514"),
-        ModelCandidate(provider="freellm", model="gpt-4o"),
+        ModelCandidate(provider="freellm", model="auto"),
     ],
     ModelTier.CODE: [
-        ModelCandidate(provider="freellm", model="deepseek-coder"),
-        ModelCandidate(provider="freellm", model="gpt-4o"),
-        ModelCandidate(provider="ollama", model="deepseek-coder-v2"),
+        ModelCandidate(provider="freellm", model="auto"),
     ],
     # Pipeline tiers — FreeLLM "auto" routes to the best available model.
     # The FreeLLM server's fallback chain picks from 50+ models ranked by

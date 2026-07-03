@@ -29,30 +29,15 @@ async def lifespan(app: FastAPI):
     setup_logging(level=settings.log_level)
     logger.info(f"Starting JARVIS v{__version__}")
     logger.info(f"Debug mode: {settings.debug}")
-    logger.info(f"Ollama: {settings.ollama_host}")
 
     # Initialize tools
     from jarvis.tools.registry import load_builtin_tools
     load_builtin_tools()
     logger.info("Tools loaded successfully")
 
-    from jarvis.auth.github_token_store import get_stored_github_token
-
-    if get_stored_github_token():
-        logger.info("GitHub token loaded for Copilot API")
-
-    from jarvis.runtime_llm import (
-        DEFAULT_OLLAMA_MODEL,
-        set_runtime_ai_provider,
-        set_runtime_ollama,
-    )
-
-    set_runtime_ollama(model=DEFAULT_OLLAMA_MODEL)
-    set_runtime_ai_provider("auto")
-    logger.info(
-        "AI: provider=auto, Ollama model=%s (avoids OOM from large llama3.x)",
-        DEFAULT_OLLAMA_MODEL,
-    )
+    from jarvis.runtime_llm import set_runtime_ai_provider
+    set_runtime_ai_provider("freellm")
+    logger.info("AI: provider=freellm, url=%s", settings.freellm_api_url)
 
     yield
 

@@ -95,8 +95,7 @@ export default function TabLayout() {
       <Tabs.Screen
         name="devices"
         options={{
-          title: 'Devices',
-          tabBarIcon: ({ color, size }) => <TabBarIcon name="laptop-outline" color={color} size={size} />,
+          href: null,
         }}
       />
       <Tabs.Screen

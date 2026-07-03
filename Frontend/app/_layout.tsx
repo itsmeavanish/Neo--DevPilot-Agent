@@ -197,9 +197,23 @@ export default function RootLayout() {
     await configManager.init();
 
     if (configManager.isPaired) {
-      const status = await getPairedLaptopStatus();
-      if (status) {
-        setLaptop(status);
+      // Don't block startup if the backend is slow/unreachable
+      try {
+        const status = await Promise.race([
+          getPairedLaptopStatus(),
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000)),
+        ]);
+        if (status) {
+          setLaptop(status);
+          setIsPaired(true);
+        } else {
+          // Server unreachable but device was previously paired — still let user in
+          setLaptop({ online: false, hostname: configManager.laptopName || 'Laptop', platform: 'unknown', pairingCode: configManager.pairingCode });
+          setIsPaired(true);
+        }
+      } catch {
+        // Network error — still let previously paired user through
+        setLaptop({ online: false, hostname: configManager.laptopName || 'Laptop', platform: 'unknown', pairingCode: configManager.pairingCode });
         setIsPaired(true);
       }
     }

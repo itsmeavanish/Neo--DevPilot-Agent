@@ -544,8 +544,8 @@ class PipelineOrchestrator:
 
 
 def should_use_pipeline(message: str) -> bool:
-    """Public API: determine if a message warrants the full pipeline."""
-    return _should_use_pipeline(message)
+    """Disabled — ReAct loop handles all tasks with compact prompt."""
+    return False
 
 
 __all__ = ["PipelineOrchestrator", "PipelineStep", "PipelinePhase", "should_use_pipeline"]

@@ -15,7 +15,7 @@ const STORAGE_KEYS = {
   WORKSPACE_ROOT: 'jarvis_workspace_root',
 } as const;
 
-/** Default public API base (ngrok). Override in Settings or use localhost only for same-machine dev. */
+/** Default API base — production backend on Render. */
 export const DEFAULT_BACKEND_URL = 'https://neo-api-oths.onrender.com';
 
 class ConfigManager {
@@ -70,7 +70,7 @@ class ConfigManager {
       const savedKey = await SecureStore.getItemAsync(STORAGE_KEYS.API_KEY);
       const savedWorkspace = await SecureStore.getItemAsync(STORAGE_KEYS.WORKSPACE_ROOT);
 
-      if (isCustomUrl === 'true' && savedUrl) {
+      if (isCustomUrl === 'true' && savedUrl && savedUrl !== 'http://0.0.0.0:8000' && savedUrl !== 'http://172.19.80.1:8000' && savedUrl !== 'http://10.81.55.139:8000') {
         this._backendUrl = savedUrl;
       } else {
         this._backendUrl = DEFAULT_BACKEND_URL;
@@ -190,3 +190,4 @@ class ConfigManager {
 
 export const configManager = new ConfigManager();
 export default configManager;
+

@@ -48,8 +48,14 @@ async function buildHeaders(
   return h;
 }
 
+function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutMs = 10000): Promise<Response> {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(id));
+}
+
 async function apiGet<T>(path: string): Promise<T> {
-  const res = await fetch(`${configManager.backendUrl}${path}`, {
+  const res = await fetchWithTimeout(`${configManager.backendUrl}${path}`, {
     headers: await buildHeaders(),
   });
   if (!res.ok) {
@@ -66,7 +72,7 @@ async function apiGet<T>(path: string): Promise<T> {
 }
 
 async function apiPost<T>(path: string, body?: unknown): Promise<T> {
-  const res = await fetch(`${configManager.backendUrl}${path}`, {
+  const res = await fetchWithTimeout(`${configManager.backendUrl}${path}`, {
     method: 'POST',
     headers: await buildHeaders(),
     body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -86,7 +92,7 @@ async function apiPost<T>(path: string, body?: unknown): Promise<T> {
 }
 
 async function apiDel<T>(path: string): Promise<T> {
-  const res = await fetch(`${configManager.backendUrl}${path}`, {
+  const res = await fetchWithTimeout(`${configManager.backendUrl}${path}`, {
     method: 'DELETE',
     headers: await buildHeaders(),
   });
@@ -95,7 +101,7 @@ async function apiDel<T>(path: string): Promise<T> {
 }
 
 async function apiCall<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const res = await fetch(`${configManager.backendUrl}${path}`, {
+  const res = await fetchWithTimeout(`${configManager.backendUrl}${path}`, {
     ...options,
     headers: {
       ...(await buildHeaders()),
@@ -940,7 +946,7 @@ const FREELLM_BASE_URL = 'https://neo-devpilot-agent.onrender.com/v1';
  */
 export async function autoConfigureFreeLLM(): Promise<FreeLLMConfigResponse> {
   try {
-    const resp = await fetch(`${FREELLM_BASE_URL}/device-key`);
+    const resp = await fetchWithTimeout(`${FREELLM_BASE_URL}/device-key`, {}, 8000);
     if (!resp.ok) {
       return { success: false, message: 'Failed to fetch device key from FreeLLM server' };
     }
@@ -959,188 +965,287 @@ export async function autoConfigureFreeLLM(): Promise<FreeLLMConfigResponse> {
 
 
 
-export interface OllamaConfigResponse {
-  success: boolean;
-  message: string;
-  host?: string;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// IDE Agent Stream — full agentic AI with tool calling (Cursor-like)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface AgentStreamEvent {
+  type: 'session' | 'thinking' | 'tool_call' | 'tool_result' | 'token' | 'done' | 'error' | 'pipeline_start' | 'phase_start' | 'phase_result';
+  content?: string;
+  session_id?: string;
+  tool?: string;
+  args?: Record<string, unknown>;
+  result?: Record<string, unknown>;
+  duration_ms?: number;
+  step?: number;
+  phase?: string;
   model?: string;
-  models?: string[];
 }
 
-export async function setOllamaConfig(
-  host = 'http://localhost:11434',
-  model = 'llama3.2:1b',
-  pull = true
-): Promise<OllamaConfigResponse> {
-  try {
-    return await apiPost<OllamaConfigResponse>('/project/ai/ollama-config', {
-      host,
-      model,
-      pull,
-    });
-  } catch (error: unknown) {
-    return {
-      success: false,
-      message: error instanceof Error ? error.message : 'Failed to configure Ollama',
-    };
-  }
+export interface IDEAgentStreamCallbacks {
+  onSessionId?: (sid: string) => void;
+  onThinking?: (content: string, step?: number) => void;
+  onToolCall?: (tool: string, args: Record<string, unknown>, step?: number) => void;
+  onToolResult?: (tool: string, result: Record<string, unknown>, durationMs?: number, step?: number) => void;
+  onToken?: (chunk: string) => void;
+  onDone?: (fullText: string) => void;
+  onError?: (error: string) => void;
+  onPipelineStart?: (content: string) => void;
+  onPhaseStart?: (phase: string, content: string) => void;
+  onPhaseResult?: (phase: string, content: string, model?: string) => void;
 }
 
-export async function getOllamaConfig(): Promise<{
-  host: string;
-  model: string;
-  default_small_model: string;
-}> {
-  return apiGet('/project/ai/ollama-config');
-}
+/**
+ * Full agentic AI stream for the IDE — connects to /project/ai/agent-stream.
+ * The agent has full access to workspace: read/write files, run commands, git, etc.
+ * Returns an abort function to cancel the stream.
+ */
+export function ideAgentStream(
+  message: string,
+  workspaceRoot: string,
+  callbacks?: IDEAgentStreamCallbacks,
+  options?: { sessionId?: string; maxSteps?: number }
+): () => void {
+  const controller = new AbortController();
 
-export async function getOllamaStatus(): Promise<OllamaConfigResponse> {
-  try {
-    const providers = await getAIProviders();
-    const ollamaProvider = providers.providers?.ollama;
-    return {
-      success: ollamaProvider?.available || false,
-      message: ollamaProvider?.message || 'Ollama not running',
-    };
-  } catch (error: unknown) {
-    return {
-      success: false,
-      message: error instanceof Error ? error.message : 'Failed to check Ollama status',
-    };
-  }
-}
+  (async () => {
+    try {
+      await configManager.init();
+      const headers = await buildHeaders();
 
-export async function getOllamaModels(): Promise<string[]> {
-  try {
-    const result = await executeCommand('ollama list');
-    if (result.success) {
-      const lines = result.stdout.split('\n').slice(1);
-      return lines
-        .filter((line) => line.trim())
-        .map((line) => line.split(/\s+/)[0])
-        .filter((name) => name && !name.includes('NAME'));
+      const res = await fetch(
+        `${configManager.backendUrl}/project/ai/agent-stream`,
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            message,
+            session_id: options?.sessionId || undefined,
+            pairing_code: configManager.pairingCode?.trim().toUpperCase() || undefined,
+            workspace_root: workspaceRoot || configManager.workspaceRoot || undefined,
+            max_steps: options?.maxSteps || 15,
+          }),
+          signal: controller.signal,
+        }
+      );
+
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        callbacks?.onError?.(
+          (errBody as { detail?: string }).detail || `Agent stream error ${res.status}`
+        );
+        return;
+      }
+
+      // React Native may not support ReadableStream — try reader first, fallback to text
+      const reader = res.body?.getReader();
+      let rawText: string;
+
+      if (reader) {
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let fullText = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue;
+            const payload = line.slice(6).trim();
+            if (payload === '[DONE]') {
+              if (fullText) callbacks?.onDone?.(fullText);
+              return;
+            }
+            try {
+              const evt = JSON.parse(payload) as AgentStreamEvent;
+              fullText = _dispatchAgentEvent(evt, fullText, callbacks);
+            } catch { /* skip malformed */ }
+          }
+        }
+        if (fullText) callbacks?.onDone?.(fullText);
+      } else {
+        // Fallback: read entire response as text and parse SSE lines
+        rawText = await res.text();
+        _parseAgentSSEText(rawText, callbacks);
+      }
+    } catch (err) {
+      if ((err as Error).name !== 'AbortError') {
+        callbacks?.onError?.(
+          err instanceof Error ? err.message : 'Agent stream connection failed'
+        );
+      }
     }
-    return [];
-  } catch {
-    return [];
+  })();
+
+  return () => controller.abort();
+}
+
+function _dispatchAgentEvent(evt: AgentStreamEvent, fullText: string, callbacks?: IDEAgentStreamCallbacks): string {
+  switch (evt.type) {
+    case 'session':
+      if (evt.session_id) callbacks?.onSessionId?.(evt.session_id);
+      break;
+    case 'thinking':
+      callbacks?.onThinking?.(evt.content || '', evt.step);
+      break;
+    case 'tool_call':
+      callbacks?.onToolCall?.(evt.tool || '', evt.args || {}, evt.step);
+      break;
+    case 'tool_result':
+      callbacks?.onToolResult?.(evt.tool || '', evt.result || {}, evt.duration_ms, evt.step);
+      break;
+    case 'token':
+      if (evt.content) {
+        fullText += evt.content;
+        callbacks?.onToken?.(evt.content);
+      }
+      break;
+    case 'done':
+      if (evt.content) fullText = evt.content;
+      callbacks?.onDone?.(fullText);
+      break;
+    case 'error':
+      callbacks?.onError?.(evt.content || 'Unknown agent error');
+      break;
+    case 'pipeline_start':
+      callbacks?.onPipelineStart?.(evt.content || '');
+      break;
+    case 'phase_start':
+      callbacks?.onPhaseStart?.(evt.phase || '', evt.content || '');
+      break;
+    case 'phase_result':
+      callbacks?.onPhaseResult?.(evt.phase || '', evt.content || '', evt.model);
+      break;
   }
+  return fullText;
+}
+
+function _parseAgentSSEText(text: string, callbacks?: IDEAgentStreamCallbacks): void {
+  let fullText = '';
+  const lines = text.split('\n');
+
+  for (const line of lines) {
+    if (!line.startsWith('data: ')) continue;
+    const payload = line.slice(6).trim();
+    if (payload === '[DONE]') {
+      if (fullText) callbacks?.onDone?.(fullText);
+      return;
+    }
+    try {
+      const evt = JSON.parse(payload) as AgentStreamEvent;
+      fullText = _dispatchAgentEvent(evt, fullText, callbacks);
+    } catch { /* skip malformed */ }
+  }
+  if (fullText) callbacks?.onDone?.(fullText);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Copilot CLI status
+// External Agents — Claude Code & Jules
 // ─────────────────────────────────────────────────────────────────────────────
 
-export interface CopilotModelsResponse {
-  current: string;
-  models: Record<string, string[]>;
+/**
+ * Run Claude Code on the paired laptop via SSE stream.
+ * Same streaming interface as ideAgentStream for seamless UI integration.
+ */
+export function claudeCodeStream(
+  message: string,
+  workspaceRoot: string,
+  callbacks?: IDEAgentStreamCallbacks,
+): () => void {
+  const controller = new AbortController();
+
+  (async () => {
+    try {
+      await configManager.init();
+      const headers = await buildHeaders();
+
+      const res = await fetch(
+        `${configManager.backendUrl}/project/ai/claude-code-stream`,
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            message,
+            pairing_code: configManager.pairingCode?.trim().toUpperCase() || undefined,
+            workspace_root: workspaceRoot || configManager.workspaceRoot || undefined,
+          }),
+          signal: controller.signal,
+        }
+      );
+
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        callbacks?.onError?.(
+          (errBody as { detail?: string }).detail || `Claude Code error ${res.status}`
+        );
+        return;
+      }
+
+      const reader = res.body?.getReader();
+      if (reader) {
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let fullText = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue;
+            const payload = line.slice(6).trim();
+            if (payload === '[DONE]') {
+              if (fullText) callbacks?.onDone?.(fullText);
+              return;
+            }
+            try {
+              const evt = JSON.parse(payload) as AgentStreamEvent;
+              fullText = _dispatchAgentEvent(evt, fullText, callbacks);
+            } catch { /* skip malformed */ }
+          }
+        }
+        if (fullText) callbacks?.onDone?.(fullText);
+      } else {
+        const rawText = await res.text();
+        _parseAgentSSEText(rawText, callbacks);
+      }
+    } catch (err) {
+      if ((err as Error).name !== 'AbortError') {
+        callbacks?.onError?.(
+          err instanceof Error ? err.message : 'Claude Code connection failed'
+        );
+      }
+    }
+  })();
+
+  return () => controller.abort();
 }
 
-export interface CopilotStatusResponse {
-  authentication: {
-    status: 'authenticated' | 'not_authenticated' | 'error';
-    message: string;
-  };
-  copilot: {
-    status: 'available' | 'unavailable' | 'error';
-    message: string;
-  };
-  model: {
-    current: string;
-    available_count: number;
-  };
-}
-
-export async function getCopilotModels(): Promise<CopilotModelsResponse> {
-  try {
-    return await apiGet<CopilotModelsResponse>('/copilot/models');
-  } catch (error: unknown) {
-    return {
-      current: 'gpt-5.2-codex',
-      models: { Error: [error instanceof Error ? error.message : 'Failed to load models'] },
-    };
-  }
-}
-
-export async function setCopilotModel(
-  model: string
-): Promise<{ success: boolean; message: string }> {
-  try {
-    return await apiPost('/copilot/models/set', { model });
-  } catch (error: unknown) {
-    return {
-      success: false,
-      message: error instanceof Error ? error.message : 'Failed to set Copilot model',
-    };
-  }
-}
-
-export async function getCopilotStatus(): Promise<CopilotStatusResponse> {
-  try {
-    return await apiGet<CopilotStatusResponse>('/copilot/status');
-  } catch (error: unknown) {
-    const m = error instanceof Error ? error.message : 'Error';
-    return {
-      authentication: { status: 'error', message: m },
-      copilot: { status: 'error', message: m },
-      model: { current: 'unknown', available_count: 0 },
-    };
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// GitHub token (legacy mobile endpoints)
-// ─────────────────────────────────────────────────────────────────────────────
-
-export interface GitHubTokenResponse {
-  success: boolean;
-  message: string;
-  username?: string;
-}
-
-export async function setGitHubToken(token: string): Promise<GitHubTokenResponse> {
-  try {
-    return await apiPost<GitHubTokenResponse>('/github/token/set', { token });
-  } catch (error: unknown) {
-    return {
-      success: false,
-      message: error instanceof Error ? error.message : 'Failed to set GitHub token',
-    };
-  }
-}
-
-export async function getGitHubTokenStatus(): Promise<GitHubTokenResponse> {
-  try {
-    return await apiGet<GitHubTokenResponse>('/github/token/status');
-  } catch {
-    return { success: false, message: 'Failed to check token status' };
-  }
-}
-
-export async function clearGitHubToken(): Promise<{ success: boolean; message: string }> {
-  try {
-    return await apiPost('/github/token/clear', {});
-  } catch (error: unknown) {
-    return {
-      success: false,
-      message: error instanceof Error ? error.message : 'Failed to clear token',
-    };
-  }
-}
-
-export async function getGitHubAuthStatus(): Promise<GitHubAuthStatus> {
-  return apiGet<GitHubAuthStatus>('/github/auth/status');
-}
-
-export async function githubLogin(): Promise<{
-  success: boolean;
-  message: string;
-  auth_url?: string;
-}> {
-  return apiPost('/github/auth/login', {});
-}
-
-export async function githubLogout(): Promise<{ success: boolean; message: string }> {
-  return apiPost('/github/auth/logout', {});
+/**
+ * Dispatch a task to Jules (creates a GitHub issue assigned to Jules).
+ */
+export async function runJulesAgent(
+  intent: string,
+  workspaceRoot?: string,
+  repo?: string,
+): Promise<{ success: boolean; message: string; issue_url?: string }> {
+  await configManager.init();
+  return apiPost('/project/ai/jules', {
+    intent,
+    pairing_code: configManager.pairingCode?.trim().toUpperCase() || undefined,
+    workspace_root: workspaceRoot || configManager.workspaceRoot || undefined,
+    repo: repo || undefined,
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

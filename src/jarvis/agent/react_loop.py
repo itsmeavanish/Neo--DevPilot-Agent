@@ -67,49 +67,21 @@ class AgentStep:
         return d
 
 
-REACT_SYSTEM_PROMPT = """You are JARVIS, an autonomous AI developer agent. You are BOTH a conversational assistant AND a command executor.
+REACT_SYSTEM_PROMPT = """You are JARVIS, an AI developer agent with full filesystem access. You MUST use tools to perform actions — NEVER claim you did something without calling the tool.
 
-When the user asks a question, you answer it. When the user gives a command (even in natural language), you EXECUTE it using your tools. Never just explain how to do something if you can do it directly.
+## Tools:
+{tools_compact}
 
-## CRITICAL: You run on a CLOUD SERVER, NOT the user's laptop.
-You do NOT have VS Code, desktop folders, or local tools. ALL actions that affect the user's machine MUST go through paired_* tools or run_paired_command.
+## JSON Response (ONLY valid JSON, nothing else):
+Tool call: {{"action": "tool_call", "tool": "<name>", "args": {{...}}}}
+Final answer: {{"action": "final_answer", "answer": "<text>"}}
 
-Examples of commands you should execute:
-- "Open my portfolio folder in VS Code" → run_paired_command with: code "C:\\Users\\<user>\\Desktop\\portfolio"
-- "Open Semester 5 in VS Code" → run_paired_command with: code "C:\\Users\\<user>\\Desktop\\Semester 5"
-- "Create a new file called app.py" → paired_write_file tool
-- "Run npm install" → run_paired_command tool
-- "Show me what's in the src folder" → paired_list_directory tool
-- "Open this project in VS Code" → run_paired_command with: code "<workspace_root>"
-
-## Tool Selection Rules:
-- ALWAYS use run_paired_command for: opening VS Code, running shell commands, launching apps
-- ALWAYS use paired_read_file / paired_write_file for: reading/writing files
-- ALWAYS use paired_list_directory for: browsing folders
-- NEVER use local tools (vscode, run_command, read_file, write_file, list_directory) — those run on the cloud server which has nothing useful
-
-## Available Tools:
-{tools_json}
-
-## Response Format:
-You MUST respond in EXACTLY one of these JSON formats (no other text):
-
-### When you need to use a tool:
-{{"action": "tool_call", "tool": "<tool_name>", "args": {{"param1": "value1"}}}}
-
-### When you have enough information to answer:
-{{"action": "final_answer", "answer": "<your complete response to the user>"}}
-
-## Rules:
-1. ACT FIRST, explain after. If the user's intent implies an action, do it.
-2. Think step by step. If you need information, call a tool first.
-3. After each tool result, decide if you need more info or can answer.
-4. Never fabricate tool results. Always call the tool to get real data.
-5. Maximum {max_steps} tool calls per turn.
-6. If a tool fails, explain the error and try an alternative approach.
-7. Keep answers concise and actionable.
-8. For file operations, use the actual file paths from the workspace.
-9. When the user mentions a folder on their Desktop or a known location, construct the full path using info from the Execution Environment section below.
+## Critical Rules:
+1. To read/write/list files → MUST call the tool. Never say "done" without tool_call first.
+2. To run commands → MUST call run_command. Never fabricate output.
+3. Use FULL ABSOLUTE paths (from workspace root below).
+4. After tool_result, decide: need more → another tool_call, OR ready → final_answer.
+5. Max {max_steps} tool calls.
 """
 
 
@@ -134,11 +106,10 @@ class ReactAgentLoop:
         self.step_timeout = step_timeout
 
     def _build_system_prompt(self, context: dict[str, Any] | None = None) -> str:
-        """Build system prompt with tool schemas and optional workspace context."""
-        schemas = self.registry.get_schemas_for_llm()
-        tools_json = json.dumps(schemas, indent=2)
+        """Build system prompt with compact tool list and optional workspace context."""
+        tools_compact = self._build_compact_tools()
         prompt = REACT_SYSTEM_PROMPT.format(
-            tools_json=tools_json,
+            tools_compact=tools_compact,
             max_steps=self.max_steps,
         )
 
@@ -180,6 +151,37 @@ class ReactAgentLoop:
 
         return prompt
 
+    def _build_compact_tools(self) -> str:
+        """Build compact tool descriptions for the system prompt."""
+        TOOL_DESCRIPTIONS = {
+            "read_file": "read_file(path, start_line?, max_lines?) — read file content",
+            "write_file": "write_file(path, content, mode='write'|'append') — write/create file",
+            "list_directory": "list_directory(path, recursive?, pattern?) — list files in dir",
+            "run_command": "run_command(command, cwd?) — run shell command",
+            "git": "git(operation='status'|'diff'|'log'|'commit'|'push'|'pull'|'branch'|'checkout', message?, branch?) — git operations",
+            "paired_read_file": "paired_read_file(path) — read file on paired laptop",
+            "paired_write_file": "paired_write_file(path, content) — write file on paired laptop",
+            "paired_list_directory": "paired_list_directory(path) — list files on paired laptop",
+            "run_paired_command": "run_paired_command(command) — run command on paired laptop",
+            "vscode": "vscode(action='open_folder'|'open_file', path) — open in VS Code",
+        }
+        lines = []
+        for name in self.registry.list_tools():
+            if name in TOOL_DESCRIPTIONS:
+                lines.append(f"- {TOOL_DESCRIPTIONS[name]}")
+            else:
+                tool = self.registry.get(name)
+                desc = getattr(tool, 'description', name)[:60] if tool else name
+                schema = self.registry.get_schemas_for_llm()
+                params = ""
+                for s in schema:
+                    if s.get("name") == name:
+                        props = s.get("parameters", {}).get("properties", {})
+                        params = ", ".join(props.keys())
+                        break
+                lines.append(f"- {name}({params}) — {desc}")
+        return "\n".join(lines)
+
     async def run(
         self,
         user_message: str,
@@ -216,6 +218,12 @@ class ReactAgentLoop:
                     self.llm_client.chat(messages=messages, system=system_prompt),
                     timeout=self.step_timeout,
                 )
+                # Retry once if empty (some models in rotation return empty)
+                if not response or not response.strip():
+                    response = await asyncio.wait_for(
+                        self.llm_client.chat(messages=messages, system=system_prompt),
+                        timeout=self.step_timeout,
+                    )
             except asyncio.TimeoutError:
                 yield AgentStep(
                     step_number=step_num,
@@ -232,6 +240,10 @@ class ReactAgentLoop:
                     duration_ms=int((time.time() - step_start) * 1000),
                 )
                 return
+
+            # Skip empty responses (model rotation can return empty)
+            if not response or not response.strip():
+                continue
 
             action_type, data = self._parse_llm_output(response)
 

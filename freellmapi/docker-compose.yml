@@ -1,6 +1,5 @@
 services:
   freellmapi:
-    image: ghcr.io/tashfeenahmed/freellmapi:latest
     build:
       context: .
       dockerfile: Dockerfile
@@ -9,6 +8,7 @@ services:
     environment:
       NODE_ENV: production
       PORT: 3001
+      FREELLM_STATIC_API_KEY: ${FREELLM_STATIC_API_KEY:-freellmapi-local-dev-permanent-key-2024}
     # Bound to localhost by default — FreeLLMAPI is single-user and must not be
     # exposed to the internet. Set HOST_BIND=0.0.0.0 to reach it from your LAN.
     ports:

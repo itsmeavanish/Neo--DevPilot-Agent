@@ -29,6 +29,9 @@ import {
   getCurrentWorkingDirectory,
   getAIProviders,
   runIDEAgentAction,
+  ideAgentStream,
+  claudeCodeStream,
+  runJulesAgent,
   FileInfo,
   CopilotEditResponse,
 } from '@/lib/api';
@@ -66,11 +69,17 @@ interface OpenTab {
 
 interface ChatMessage {
   id: string;
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'system';
   content: string;
   isError?: boolean;
   diff?: string;
   filePath?: string;
+  isThinking?: boolean;
+  isToolCall?: boolean;
+  toolName?: string;
+  toolArgs?: Record<string, unknown>;
+  toolResult?: Record<string, unknown>;
+  durationMs?: number;
 }
 
 // Responsive breakpoints
@@ -106,11 +115,11 @@ export default function IDEScreen() {
       id: '1',
       role: 'assistant',
       content:
-        'AI assistant ready.\n\n' +
-        '• Chat: ask anything (works without a file open)\n' +
-        '• Agent mode: "add, commit and push to main" runs git on your paired laptop\n' +
-        '• Code edit: open a file, then say "edit …" or "fix …"\n\n' +
-        'Configure AI in Settings (GitHub token, OpenAI, or Ollama).',
+        'AI Agent ready. I have full access to your workspace.\n\n' +
+        '• I can read, write, and create files\n' +
+        '• I can run terminal commands and git operations\n' +
+        '• I can refactor, fix bugs, and implement features\n\n' +
+        'Open a folder and ask me anything — like Cursor.',
     },
   ]);
   const [chatInput, setChatInput] = useState('');
@@ -118,6 +127,12 @@ export default function IDEScreen() {
   const [pendingEdit, setPendingEdit] = useState<CopilotEditResponse | null>(null);
   const [agentMode, setAgentMode] = useState(true);
   const [aiProviderLabel, setAiProviderLabel] = useState('');
+  const [agentSessionId, setAgentSessionId] = useState<string | undefined>();
+  const abortAgentRef = useRef<(() => void) | null>(null);
+
+  // Agent selector: 'freellm' | 'claude_code' | 'jules'
+  const [selectedAgent, setSelectedAgent] = useState<'freellm' | 'claude_code' | 'jules'>('freellm');
+  const [showAgentPicker, setShowAgentPicker] = useState(false);
 
   // UI state - responsive
   const [sidebarCollapsed, setSidebarCollapsed] = useState(isMobile);
@@ -339,40 +354,170 @@ export default function IDEScreen() {
 
     try {
       if (agentMode) {
-        await configManager.init();
-        if (!configManager.pairingCode) {
-          setChatMessages(prev => [
-            ...prev,
-            {
-              id: (Date.now() + 1).toString(),
-              role: 'assistant',
-              content:
-                'Agent mode needs a paired laptop. Open Settings, enter your pairing code, and keep the PC agent running.',
-              isError: true,
-            },
-          ]);
+        // Full agentic mode — route to selected agent
+        let contextMessage = currentInput;
+        if (activeTab) {
+          const activeFileData = openTabs.find(t => t.path === activeTab);
+          if (activeFileData) {
+            contextMessage = `[Currently editing: ${activeTab}]\n\n${currentInput}`;
+          }
+        }
+
+        // Jules agent — async dispatch via GitHub issues
+        if (selectedAgent === 'jules') {
+          setChatMessages(prev => [...prev, {
+            id: `jules-thinking-${Date.now()}`,
+            role: 'system' as const,
+            content: 'Dispatching task to Jules...',
+            isThinking: true,
+          }]);
+
+          try {
+            const result = await runJulesAgent(currentInput, currentPath);
+            setChatMessages(prev => {
+              const without = prev.filter(m => !m.isThinking);
+              return [...without, {
+                id: `jules-${Date.now()}`,
+                role: 'assistant' as const,
+                content: result.success
+                  ? `Task dispatched to Jules.\n\n${result.issue_url ? `Issue: ${result.issue_url}` : result.message}`
+                  : `Failed: ${result.message}`,
+                isError: !result.success,
+              }];
+            });
+          } catch (err) {
+            setChatMessages(prev => {
+              const without = prev.filter(m => !m.isThinking);
+              return [...without, {
+                id: `jules-err-${Date.now()}`,
+                role: 'assistant' as const,
+                content: err instanceof Error ? err.message : 'Jules dispatch failed',
+                isError: true,
+              }];
+            });
+          }
+          setLoadingChat(false);
+          chatScrollRef.current?.scrollToEnd({ animated: true });
           return;
         }
-        const agentResult = await runIDEAgentAction(currentInput, currentPath);
-        if (agentResult.handled) {
-          setChatMessages(prev => [
-            ...prev,
-            {
-              id: (Date.now() + 1).toString(),
-              role: 'assistant',
-              content: agentResult.message,
-              isError: !agentResult.success,
-            },
-          ]);
-          return;
+
+        // Add a thinking indicator
+        const thinkingId = `thinking-${Date.now()}`;
+        setChatMessages(prev => [...prev, {
+          id: thinkingId,
+          role: 'system',
+          content: selectedAgent === 'claude_code' ? 'Running Claude Code...' : 'Thinking...',
+          isThinking: true,
+        }]);
+
+        const agentCallbacks = {
+          onSessionId: (sid: string) => {
+            setAgentSessionId(sid);
+          },
+          onThinking: (content: string, step?: number) => {
+            setChatMessages(prev => prev.map(m =>
+              m.id === thinkingId
+                ? { ...m, content: content || `Reasoning (step ${step || 1})...` }
+                : m
+            ));
+          },
+          onToolCall: (tool: string, args: Record<string, unknown>, step?: number) => {
+            const toolId = `tool-${Date.now()}-${step}`;
+            setChatMessages(prev => {
+              const without = prev.filter(m => m.id !== thinkingId);
+              return [...without, {
+                id: toolId,
+                role: 'system' as const,
+                content: `Using ${tool}`,
+                isToolCall: true,
+                toolName: tool,
+                toolArgs: args,
+              }];
+            });
+          },
+          onToolResult: (tool: string, result: Record<string, unknown>, durationMs?: number) => {
+            setChatMessages(prev => {
+              const lastToolIdx = prev.findLastIndex(m => m.isToolCall && m.toolName === tool);
+              if (lastToolIdx >= 0) {
+                const updated = [...prev];
+                updated[lastToolIdx] = {
+                  ...updated[lastToolIdx],
+                  toolResult: result,
+                  durationMs,
+                  content: `${tool} ${result?.status === 'success' ? '✓' : '✗'} ${durationMs ? `(${durationMs}ms)` : ''}`,
+                };
+                return updated;
+              }
+              return prev;
+            });
+          },
+          onToken: () => {
+            setChatMessages(prev => prev.filter(m => m.id !== thinkingId));
+          },
+          onDone: (fullText: string) => {
+            setChatMessages(prev => {
+              const without = prev.filter(m => m.id !== thinkingId);
+              return [...without, {
+                id: `answer-${Date.now()}`,
+                role: 'assistant' as const,
+                content: fullText || 'Done.',
+              }];
+            });
+            setLoadingChat(false);
+            loadDirectory(currentPath);
+            if (activeTab) {
+              readFile(activeTab, 1000).then(result => {
+                if (!result.error) {
+                  setOpenTabs(prev => prev.map(t =>
+                    t.path === activeTab ? { ...t, content: result.content, modified: false } : t
+                  ));
+                }
+              }).catch(() => {});
+            }
+            chatScrollRef.current?.scrollToEnd({ animated: true });
+          },
+          onError: (error: string) => {
+            setChatMessages(prev => {
+              const without = prev.filter(m => m.id !== thinkingId);
+              return [...without, {
+                id: `error-${Date.now()}`,
+                role: 'assistant' as const,
+                content: error,
+                isError: true,
+              }];
+            });
+            setLoadingChat(false);
+            chatScrollRef.current?.scrollToEnd({ animated: true });
+          },
+          onPipelineStart: (content: string) => {
+            setChatMessages(prev => prev.map(m =>
+              m.id === thinkingId ? { ...m, content } : m
+            ));
+          },
+          onPhaseStart: (phase: string) => {
+            setChatMessages(prev => prev.map(m =>
+              m.id === thinkingId ? { ...m, content: `Phase: ${phase}...` } : m
+            ));
+          },
+        };
+
+        // Route to FreeLLM or Claude Code based on selection
+        let abort: () => void;
+        if (selectedAgent === 'claude_code') {
+          abort = claudeCodeStream(contextMessage, currentPath, agentCallbacks);
+        } else {
+          abort = ideAgentStream(contextMessage, currentPath, agentCallbacks, { sessionId: agentSessionId });
         }
+
+        abortAgentRef.current = abort;
+        return;
       }
 
+      // Chat mode — simple Q&A or code edits
       const isEditRequest =
         /\b(edit|change|modify|update|fix|refactor|rewrite)\b/i.test(currentInput) && activeTab;
 
       if (isEditRequest && activeTab) {
-        // Use Copilot editing for code modifications
         const result = await copilotEdit(activeTab, currentInput, false);
 
         const assistantMsg: ChatMessage = {
@@ -387,13 +532,8 @@ export default function IDEScreen() {
         };
 
         setChatMessages(prev => [...prev, assistantMsg]);
-
-        // If successful, show the pending edit
-        if (result.success) {
-          setPendingEdit(result);
-        }
+        if (result.success) setPendingEdit(result);
       } else {
-        // Use general AI chat for questions, explanations, etc.
         const fileContent = activeTab ? (await readFile(activeTab)).content : undefined;
         const fileLanguage = activeTab ? activeTab.split('.').pop() : undefined;
 
@@ -404,26 +544,24 @@ export default function IDEScreen() {
           fileLanguage
         );
 
-        const assistantMsg: ChatMessage = {
+        setChatMessages(prev => [...prev, {
           id: (Date.now() + 1).toString(),
           role: 'assistant',
           content: aiResponse.status === 'success'
             ? aiResponse.response
-            : aiResponse.error || 'AI is not available. Check your AI provider settings.',
+            : aiResponse.error || 'AI is not available.',
           isError: aiResponse.status !== 'success',
-        };
-
-        setChatMessages(prev => [...prev, assistantMsg]);
+        }]);
       }
     } catch (err) {
       setChatMessages(prev => [...prev, {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
-        content: `Error: ${err instanceof Error ? err.message : 'Failed to get AI response. Check your connection and AI provider settings.'}`,
+        content: `Error: ${err instanceof Error ? err.message : 'Failed to get AI response.'}`,
         isError: true,
       }]);
     } finally {
-      setLoadingChat(false);
+      if (!agentMode) setLoadingChat(false);
       chatScrollRef.current?.scrollToEnd({ animated: true });
     }
   };
@@ -702,10 +840,19 @@ export default function IDEScreen() {
         ]}>
           <View style={styles.copilotHeader}>
             <Ionicons name="sparkles" size={16} color={VSColors.accent} />
-            <Text style={styles.copilotTitle}>{agentMode ? 'AI AGENT' : 'AI CHAT'}</Text>
-            {aiProviderLabel ? (
-              <Text style={styles.providerBadge}>{aiProviderLabel}</Text>
-            ) : null}
+            <Text style={styles.copilotTitle}>{agentMode ? 'AGENT' : 'CHAT'}</Text>
+            {/* Agent Selector Dropdown */}
+            {agentMode && (
+              <TouchableOpacity
+                style={styles.agentSelector}
+                onPress={() => setShowAgentPicker(!showAgentPicker)}
+              >
+                <Text style={styles.agentSelectorText}>
+                  {selectedAgent === 'freellm' ? 'FreeLLM' : selectedAgent === 'claude_code' ? 'Claude Code' : 'Jules'}
+                </Text>
+                <Ionicons name={showAgentPicker ? 'chevron-up' : 'chevron-down'} size={12} color={VSColors.accent} />
+              </TouchableOpacity>
+            )}
             <TouchableOpacity
               style={[styles.agentToggle, agentMode && styles.agentToggleOn]}
               onPress={() => setAgentMode((v) => !v)}
@@ -719,6 +866,41 @@ export default function IDEScreen() {
               </TouchableOpacity>
             )}
           </View>
+          {/* Agent Picker Dropdown */}
+          {showAgentPicker && agentMode && (
+            <View style={styles.agentPickerDropdown}>
+              <TouchableOpacity
+                style={[styles.agentPickerItem, selectedAgent === 'freellm' && styles.agentPickerItemActive]}
+                onPress={() => { setSelectedAgent('freellm'); setShowAgentPicker(false); }}
+              >
+                <Ionicons name="infinite-outline" size={16} color={selectedAgent === 'freellm' ? VSColors.accent : VSColors.text} />
+                <View style={styles.agentPickerInfo}>
+                  <Text style={[styles.agentPickerName, selectedAgent === 'freellm' && styles.agentPickerNameActive]}>FreeLLM</Text>
+                  <Text style={styles.agentPickerDesc}>Free AI agent with full workspace access</Text>
+                </View>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.agentPickerItem, selectedAgent === 'claude_code' && styles.agentPickerItemActive]}
+                onPress={() => { setSelectedAgent('claude_code'); setShowAgentPicker(false); }}
+              >
+                <Ionicons name="terminal-outline" size={16} color={selectedAgent === 'claude_code' ? VSColors.accent : VSColors.text} />
+                <View style={styles.agentPickerInfo}>
+                  <Text style={[styles.agentPickerName, selectedAgent === 'claude_code' && styles.agentPickerNameActive]}>Claude Code</Text>
+                  <Text style={styles.agentPickerDesc}>Anthropic's CLI agent on your laptop</Text>
+                </View>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.agentPickerItem, selectedAgent === 'jules' && styles.agentPickerItemActive]}
+                onPress={() => { setSelectedAgent('jules'); setShowAgentPicker(false); }}
+              >
+                <Ionicons name="git-branch-outline" size={16} color={selectedAgent === 'jules' ? VSColors.accent : VSColors.text} />
+                <View style={styles.agentPickerInfo}>
+                  <Text style={[styles.agentPickerName, selectedAgent === 'jules' && styles.agentPickerNameActive]}>Jules</Text>
+                  <Text style={styles.agentPickerDesc}>GitHub's async coding agent via issues</Text>
+                </View>
+              </TouchableOpacity>
+            </View>
+          )}
 
           <ScrollView
             ref={chatScrollRef}
@@ -726,22 +908,62 @@ export default function IDEScreen() {
             onContentSizeChange={() => chatScrollRef.current?.scrollToEnd({ animated: true })}
             keyboardShouldPersistTaps="handled"
           >
-            {chatMessages.map(msg => (
-              <View key={msg.id} style={[styles.chatBubble, msg.role === 'user' ? styles.userBubble : styles.aiBubble]}>
-                <Text style={[styles.chatText, msg.isError && styles.chatError]}>{msg.content}</Text>
-                {msg.diff && (
-                  <View style={styles.diffBox}>
-                    <Text style={styles.diffText}>{msg.diff.substring(0, 500)}</Text>
-                    {pendingEdit && (
-                      <TouchableOpacity style={styles.applyBtn} onPress={applyEdit}>
-                        <Text style={styles.applyBtnText}>Apply Changes</Text>
-                      </TouchableOpacity>
-                    )}
+            {chatMessages.map(msg => {
+              if (msg.isThinking) {
+                return (
+                  <View key={msg.id} style={styles.thinkingBubble}>
+                    <ActivityIndicator size="small" color={VSColors.accent} />
+                    <Text style={styles.thinkingText}>{msg.content}</Text>
                   </View>
-                )}
-              </View>
-            ))}
-            {loadingChat && <ActivityIndicator size="small" color={VSColors.accent} style={{ marginTop: 8 }} />}
+                );
+              }
+              if (msg.isToolCall) {
+                return (
+                  <View key={msg.id} style={styles.toolCallBubble}>
+                    <View style={styles.toolCallHeader}>
+                      <Ionicons name="build" size={12} color={VSColors.accent} />
+                      <Text style={styles.toolCallName}>{msg.toolName}</Text>
+                      {msg.toolResult && (
+                        <Text style={[styles.toolCallStatus, msg.toolResult.status === 'success' ? styles.toolCallSuccess : styles.toolCallFail]}>
+                          {msg.toolResult.status === 'success' ? '✓' : '✗'}
+                        </Text>
+                      )}
+                      {msg.durationMs ? (
+                        <Text style={styles.toolCallDuration}>{msg.durationMs}ms</Text>
+                      ) : null}
+                    </View>
+                    {msg.toolArgs && Object.keys(msg.toolArgs).length > 0 && (
+                      <Text style={styles.toolCallArgs} numberOfLines={2}>
+                        {Object.entries(msg.toolArgs).map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`).join(', ')}
+                      </Text>
+                    )}
+                    {msg.toolResult && 'output' in msg.toolResult && msg.toolResult.output ? (
+                      <Text style={styles.toolCallOutput} numberOfLines={3}>
+                        {String(msg.toolResult.output as string).substring(0, 200)}
+                      </Text>
+                    ) : null}
+                  </View>
+                );
+              }
+              return (
+                <View key={msg.id} style={[styles.chatBubble, msg.role === 'user' ? styles.userBubble : styles.aiBubble]}>
+                  <Text style={[styles.chatText, msg.isError && styles.chatError]}>{msg.content}</Text>
+                  {msg.diff && (
+                    <View style={styles.diffBox}>
+                      <Text style={styles.diffText}>{msg.diff.substring(0, 500)}</Text>
+                      {pendingEdit && (
+                        <TouchableOpacity style={styles.applyBtn} onPress={applyEdit}>
+                          <Text style={styles.applyBtnText}>Apply Changes</Text>
+                        </TouchableOpacity>
+                      )}
+                    </View>
+                  )}
+                </View>
+              );
+            })}
+            {loadingChat && !chatMessages.some(m => m.isThinking) && (
+              <ActivityIndicator size="small" color={VSColors.accent} style={{ marginTop: 8 }} />
+            )}
           </ScrollView>
 
           {/* Copilot Input - Always visible with send button */}
@@ -752,14 +974,14 @@ export default function IDEScreen() {
               onChangeText={setChatInput}
               placeholder={
                 agentMode
-                  ? 'e.g. add, commit and push to main'
+                  ? 'Ask anything — I can read/write files, run commands…'
                   : activeTab
                     ? 'Ask or request code edits…'
                     : 'Ask AI (open a file to edit code)…'
               }
               placeholderTextColor={VSColors.textMuted}
               multiline
-              maxLength={500}
+              maxLength={2000}
               onSubmitEditing={sendCopilotMessage}
               blurOnSubmit={false}
             />
@@ -1126,6 +1348,61 @@ const styles = StyleSheet.create({
     color: VSColors.text,
     fontWeight: '600',
   },
+  agentSelector: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 4,
+    backgroundColor: VSColors.inputBg,
+    borderWidth: 1,
+    borderColor: VSColors.accent + '66',
+    marginLeft: 6,
+  },
+  agentSelectorText: {
+    fontSize: 10,
+    color: VSColors.accent,
+    fontWeight: '600',
+  },
+  agentPickerDropdown: {
+    backgroundColor: VSColors.sidebar,
+    borderWidth: 1,
+    borderColor: VSColors.border,
+    borderRadius: 6,
+    marginHorizontal: 8,
+    marginBottom: 4,
+    overflow: 'hidden',
+  },
+  agentPickerItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 10,
+    gap: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: VSColors.border,
+  },
+  agentPickerItemActive: {
+    backgroundColor: VSColors.accent + '22',
+    borderLeftWidth: 2,
+    borderLeftColor: VSColors.accent,
+  },
+  agentPickerInfo: {
+    flex: 1,
+  },
+  agentPickerName: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: VSColors.text,
+  },
+  agentPickerNameActive: {
+    color: VSColors.accent,
+  },
+  agentPickerDesc: {
+    fontSize: 10,
+    color: VSColors.textMuted,
+    marginTop: 1,
+  },
   chatMessages: {
     flex: 1,
     padding: 8,
@@ -1283,5 +1560,68 @@ const styles = StyleSheet.create({
   modalBtnText: {
     color: VSColors.text,
     fontWeight: '600',
+  },
+  thinkingBubble: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 8,
+    marginBottom: 8,
+    backgroundColor: VSColors.inputBg,
+    borderRadius: 6,
+    gap: 8,
+  },
+  thinkingText: {
+    fontSize: 12,
+    color: VSColors.textMuted,
+    fontStyle: 'italic',
+  },
+  toolCallBubble: {
+    marginBottom: 6,
+    padding: 8,
+    backgroundColor: '#1a2a1a',
+    borderRadius: 6,
+    borderLeftWidth: 2,
+    borderLeftColor: VSColors.accent,
+  },
+  toolCallHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  toolCallName: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: VSColors.accent,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  toolCallStatus: {
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  toolCallSuccess: {
+    color: VSColors.success,
+  },
+  toolCallFail: {
+    color: VSColors.error,
+  },
+  toolCallDuration: {
+    fontSize: 10,
+    color: VSColors.textMuted,
+    marginLeft: 'auto',
+  },
+  toolCallArgs: {
+    fontSize: 10,
+    color: VSColors.textMuted,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    marginTop: 4,
+  },
+  toolCallOutput: {
+    fontSize: 10,
+    color: VSColors.text,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    marginTop: 4,
+    backgroundColor: VSColors.bg,
+    padding: 4,
+    borderRadius: 3,
   },
 });

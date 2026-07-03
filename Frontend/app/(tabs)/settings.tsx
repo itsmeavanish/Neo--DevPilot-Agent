@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -18,19 +18,10 @@ import {
   checkHealth,
   LaptopStatus,
   getAIProviders,
-  setAIProvider,
-  getCopilotStatus,
-  getCopilotModels,
-  setCopilotModel,
-  getGitHubTokenStatus,
-  setGitHubToken,
-  clearGitHubToken,
   getFreeLLMStatus,
   setFreeLLMConfig,
   autoConfigureFreeLLM,
-  getOllamaStatus,
-  setOllamaConfig,
-  getOllamaModels,
+  executeCommand,
 } from '@/lib/api';
 
 export default function SettingsScreen() {
@@ -42,27 +33,21 @@ export default function SettingsScreen() {
   // AI Provider states
   const [aiProviders, setAiProviders] = useState<any>(null);
   const [loadingAI, setLoadingAI] = useState(false);
-  const [githubTokenStatus, setGithubTokenStatus] = useState<any>(null);
   const [freellmStatus, setFreellmStatus] = useState<any>(null);
-  const [ollamaStatus, setOllamaStatus] = useState<any>(null);
 
-  // Copilot CLI states
-  const [copilotStatus, setCopilotStatus] = useState<any>(null);
-  const [copilotModels, setCopilotModels] = useState<any>(null);
-  const [showCopilotModelModal, setShowCopilotModelModal] = useState(false);
+  // Device management states
+  const [showCommandModal, setShowCommandModal] = useState(false);
+  const [deviceCommand, setDeviceCommand] = useState('');
+  const [commandResult, setCommandResult] = useState<string | null>(null);
+  const [executingCommand, setExecutingCommand] = useState(false);
 
   // Modal states
-  const [showGitHubTokenModal, setShowGitHubTokenModal] = useState(false);
   const [showFreellmModal, setShowFreellmModal] = useState(false);
-  const [showOllamaModal, setShowOllamaModal] = useState(false);
+  const [showServerUrlModal, setShowServerUrlModal] = useState(false);
 
   // Input states
-  const [githubTokenInput, setGithubTokenInput] = useState('');
   const [freellmKeyInput, setFreellmKeyInput] = useState('');
   const [freellmUrlInput, setFreellmUrlInput] = useState('https://neo-devpilot-agent.onrender.com/v1');
-  const [ollamaHostInput, setOllamaHostInput] = useState('http://localhost:11434');
-  const [ollamaModelInput, setOllamaModelInput] = useState('llama3.2:1b');
-  const [showServerUrlModal, setShowServerUrlModal] = useState(false);
   const [serverUrlInput, setServerUrlInput] = useState('');
 
   useEffect(() => {
@@ -73,11 +58,9 @@ export default function SettingsScreen() {
   const loadStatus = async () => {
     setLoading(true);
     try {
-      // Check server
       const health = await checkHealth();
       setServerOnline(health.status === 'ok');
 
-      // Check laptop
       const status = await getPairedLaptopStatus();
       setLaptop(status);
     } catch {
@@ -90,36 +73,21 @@ export default function SettingsScreen() {
   const loadAIStatus = async () => {
     setLoadingAI(true);
     try {
-      // Get AI providers status
       const providers = await getAIProviders();
       setAiProviders(providers);
 
-      // Get Copilot CLI status (replaces GitHub token status)
-      const copilotStat = await getCopilotStatus();
-      setCopilotStatus(copilotStat);
-
-      // Get Copilot models
-      const models = await getCopilotModels();
-      setCopilotModels(models);
-
-      // Get other provider statuses
       let freellmStat = await getFreeLLMStatus();
-
-      // Auto-configure FreeLLM with permanent device key if not already configured
-      if (!freellmStat.success) {
-        const autoResult = await autoConfigureFreeLLM();
-        if (autoResult.success) {
-          freellmStat = await getFreeLLMStatus();
-        }
-      }
       setFreellmStatus(freellmStat);
 
-      const ollamaStat = await getOllamaStatus();
-      setOllamaStatus(ollamaStat);
-
-      // Keep GitHub token status for legacy compatibility
-      const githubStatus = await getGitHubTokenStatus();
-      setGithubTokenStatus(githubStatus);
+      // Auto-configure FreeLLM in background if not already configured
+      if (!freellmStat.success) {
+        autoConfigureFreeLLM().then(async (autoResult) => {
+          if (autoResult.success) {
+            const updated = await getFreeLLMStatus();
+            setFreellmStatus(updated);
+          }
+        }).catch(() => {});
+      }
     } catch (error) {
       console.warn('Failed to load AI status:', error);
     } finally {
@@ -127,65 +95,23 @@ export default function SettingsScreen() {
     }
   };
 
-  const handleProviderChange = async (provider: string) => {
+  const handleDeviceCommand = async () => {
+    if (!deviceCommand.trim()) return;
+    setExecutingCommand(true);
+    setCommandResult(null);
     try {
-      const result = await setAIProvider(provider);
-      if (result.success) {
-        await loadAIStatus(); // Refresh status
-        Alert.alert('Success', `Switched to ${provider}`);
-      } else {
-        Alert.alert('Error', result.message);
-      }
+      const result = await executeCommand(deviceCommand.trim());
+      setCommandResult(
+        result.success
+          ? result.stdout || 'Command executed successfully'
+          : result.error || result.stderr || 'Command failed'
+      );
     } catch (error: any) {
-      Alert.alert('Error', error.message || 'Failed to change provider');
+      setCommandResult(`Error: ${error.message}`);
+    } finally {
+      setExecutingCommand(false);
     }
   };
-
-  const handleGitHubToken = async () => {
-    if (!githubTokenInput.trim()) {
-      Alert.alert('Error', 'Please enter a GitHub token');
-      return;
-    }
-
-    try {
-      const result = await setGitHubToken(githubTokenInput.trim());
-      if (result.success) {
-        setShowGitHubTokenModal(false);
-        setGithubTokenInput('');
-        await loadAIStatus();
-        Alert.alert('Success', result.message);
-      } else {
-        Alert.alert('Error', result.message);
-      }
-    } catch (error: any) {
-      Alert.alert('Error', error.message || 'Failed to save GitHub token');
-    }
-  };
-
-  const handleClearGitHubToken = async () => {
-    Alert.alert(
-      'Clear GitHub Token',
-      'Are you sure you want to clear your GitHub token? This will disable Copilot API access.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Clear',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              await clearGitHubToken();
-              await loadAIStatus();
-              Alert.alert('Success', 'GitHub token cleared');
-            } catch (error: any) {
-              Alert.alert('Error', error.message || 'Failed to clear token');
-            }
-          },
-        },
-      ]
-    );
-  };
-
-
 
   const handleFreellmConfig = async () => {
     if (!freellmKeyInput.trim() || !freellmUrlInput.trim()) {
@@ -196,12 +122,10 @@ export default function SettingsScreen() {
     try {
       const result = await setFreeLLMConfig(freellmKeyInput.trim(), freellmUrlInput.trim());
       if (result.success) {
-        // Auto-activate FreeLLM as the AI provider after successful configuration
-        await setAIProvider('freellm');
         setShowFreellmModal(false);
         setFreellmKeyInput('');
         await loadAIStatus();
-        Alert.alert('Success', 'FreeLLM configured and activated as AI provider.');
+        Alert.alert('Success', 'FreeLLM configured successfully.');
       } else {
         Alert.alert('Error', result.message);
       }
@@ -214,7 +138,6 @@ export default function SettingsScreen() {
     try {
       const result = await autoConfigureFreeLLM();
       if (result.success) {
-        await setAIProvider('freellm');
         setShowFreellmModal(false);
         await loadAIStatus();
         Alert.alert('Success', 'FreeLLM auto-configured with permanent device key.');
@@ -223,26 +146,6 @@ export default function SettingsScreen() {
       }
     } catch (error: any) {
       Alert.alert('Error', error.message || 'Failed to auto-configure FreeLLM');
-    }
-  };
-
-  const handleOllamaConfig = async () => {
-    try {
-      const result = await setOllamaConfig(
-        ollamaHostInput.trim(),
-        ollamaModelInput.trim() || 'llama3.2:1b',
-        true
-      );
-      if (result.success) {
-        setShowOllamaModal(false);
-        await loadAIStatus();
-        await handleProviderChange('auto');
-        Alert.alert('Success', result.message);
-      } else {
-        Alert.alert('Error', result.message);
-      }
-    } catch (error: any) {
-      Alert.alert('Error', error.message || 'Failed to configure Ollama');
     }
   };
 
@@ -262,21 +165,6 @@ export default function SettingsScreen() {
       Alert.alert('Success', 'Server URL updated successfully');
     } catch (error: any) {
       Alert.alert('Error', error.message || 'Failed to save Server URL');
-    }
-  };
-
-  const handleCopilotModelChange = async (selectedModel: string) => {
-    try {
-      const result = await setCopilotModel(selectedModel);
-      if (result.success) {
-        setShowCopilotModelModal(false);
-        await loadAIStatus();
-        Alert.alert('Success', `Copilot model changed to ${selectedModel}`);
-      } else {
-        Alert.alert('Error', result.message);
-      }
-    } catch (error: any) {
-      Alert.alert('Error', error.message || 'Failed to change Copilot model');
     }
   };
 
@@ -353,11 +241,6 @@ export default function SettingsScreen() {
             <View style={styles.cardInfo}>
               <Text style={styles.cardTitle}>JARVIS Server</Text>
               <Text style={styles.cardSubtitle} numberOfLines={1}>{configManager.backendUrl}</Text>
-              {configManager.isBackendUrlUnsafe && (
-                <Text style={{ color: 'red', marginTop: 8 }}>
-                  Warning: Backend URL is set to localhost or 127.0.0.1. This will not work in production APK. Please use your ngrok or public URL.
-                </Text>
-              )}
             </View>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
               <TouchableOpacity
@@ -380,157 +263,68 @@ export default function SettingsScreen() {
         </View>
       </View>
 
-      {/* AI Configuration */}
+      {/* Device Management */}
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>Device Management</Text>
+        <View style={styles.card}>
+          <View style={styles.cardRow}>
+            <Ionicons name="laptop-outline" size={24} color={Colors.primary} />
+            <View style={styles.cardInfo}>
+              <Text style={styles.cardTitle}>{laptop?.hostname || 'My Laptop'}</Text>
+              <Text style={styles.cardSubtitle}>{laptop?.platform || 'Windows'}</Text>
+            </View>
+            <View style={styles.statusBadge}>
+              <View style={[styles.statusDot, { backgroundColor: laptop?.online ? Colors.green : Colors.red }]} />
+              <Text style={[styles.statusText, { color: laptop?.online ? Colors.green : Colors.red }]}>
+                {laptop?.online ? 'Online' : 'Offline'}
+              </Text>
+            </View>
+          </View>
+          {laptop?.online && (
+            <TouchableOpacity
+              style={[styles.actionButton, { marginTop: 12, marginBottom: 0 }]}
+              onPress={() => setShowCommandModal(true)}
+            >
+              <Ionicons name="terminal" size={20} color={Colors.foreground} />
+              <Text style={styles.actionButtonText}>Run Command</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+      </View>
+
+      {/* AI Configuration - FreeLLM Only */}
       <View style={styles.section}>
         <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>AI Providers</Text>
+          <Text style={styles.sectionTitle}>AI Provider</Text>
           {loadingAI && <ActivityIndicator size="small" color={Colors.primary} />}
         </View>
 
-        {/* Current Provider */}
-        {aiProviders && (
-          <View style={styles.card}>
-            <View style={styles.cardRow}>
-              <Ionicons name="sparkles" size={24} color={Colors.primary} />
-              <View style={styles.cardInfo}>
-                <Text style={styles.cardTitle}>Current Provider</Text>
-                <Text style={styles.cardSubtitle}>{aiProviders.current || 'None selected'}</Text>
-              </View>
-              <TouchableOpacity onPress={loadAIStatus}>
-                <Ionicons name="refresh-outline" size={20} color={Colors.muted} />
-              </TouchableOpacity>
-            </View>
+        <View style={styles.providerCard}>
+          <View style={styles.providerHeader}>
+            <Ionicons name="infinite-outline" size={20} color={Colors.primary} />
+            <Text style={styles.providerName}>FreeLLM</Text>
+            <View style={[styles.statusDot, {
+              backgroundColor: (freellmStatus?.success || aiProviders?.providers?.freellm?.available) ? Colors.green : Colors.red
+            }]} />
           </View>
-        )}
-
-        {/* Provider Options */}
-        {aiProviders?.providers && (
-          <View style={styles.providerGrid}>
-            {/* GitHub Copilot CLI */}
-            <View style={styles.providerCard}>
-              <View style={styles.providerHeader}>
-                <Ionicons name="logo-github" size={20} color={Colors.primary} />
-                <Text style={styles.providerName}>GitHub Copilot CLI</Text>
-                <View style={[styles.statusDot, {
-                  backgroundColor: (copilotStatus?.authentication?.status === 'authenticated' &&
-                                   copilotStatus?.copilot?.status === 'available') ? Colors.green : Colors.red
-                }]} />
-              </View>
-              <Text style={styles.providerStatus}>
-                {githubTokenStatus?.success
-                  ? `Token: ${githubTokenStatus.message}`
-                  : copilotStatus?.authentication?.message || 'Not linked'}
-                {'\n'}
-                {copilotStatus?.copilot?.message || 'Checking Copilot…'}
-                {copilotStatus?.model?.current ? `\nModel: ${copilotStatus.model.current}` : ''}
-              </Text>
-              <View style={styles.providerActions}>
-                <TouchableOpacity
-                  style={styles.configButton}
-                  onPress={() => setShowGitHubTokenModal(true)}
-                >
-                  <Ionicons name="key-outline" size={16} color={Colors.primary} />
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[styles.providerButton, aiProviders.current === 'copilot' && styles.activeProvider]}
-                  onPress={() => handleProviderChange('copilot')}
-                >
-                  <Text style={[styles.providerButtonText, aiProviders.current === 'copilot' && styles.activeProviderText]}>
-                    {aiProviders.current === 'copilot' ? 'Active' : 'Use'}
-                  </Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={styles.configButton}
-                  onPress={() => setShowCopilotModelModal(true)}
-                >
-                  <Ionicons name="cog-outline" size={16} color={Colors.muted} />
-                </TouchableOpacity>
-              </View>
-            </View>
-
-
-            {/* Ollama */}
-            <View style={styles.providerCard}>
-              <View style={styles.providerHeader}>
-                <Ionicons name="hardware-chip-outline" size={20} color={Colors.primary} />
-                <Text style={styles.providerName}>Ollama</Text>
-                <View style={[styles.statusDot, {
-                  backgroundColor: aiProviders.providers.ollama?.available ? Colors.green : Colors.red
-                }]} />
-              </View>
-              <Text style={styles.providerStatus}>
-                {aiProviders.providers.ollama?.message || 'Not running'}
-              </Text>
-              <View style={styles.providerActions}>
-                <TouchableOpacity
-                  style={[styles.providerButton, aiProviders.current === 'ollama' && styles.activeProvider]}
-                  onPress={() => handleProviderChange('ollama')}
-                >
-                  <Text style={[styles.providerButtonText, aiProviders.current === 'ollama' && styles.activeProviderText]}>
-                    {aiProviders.current === 'ollama' ? 'Active' : 'Use'}
-                  </Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={styles.configButton}
-                  onPress={() => setShowOllamaModal(true)}
-                >
-                  <Ionicons name="settings-outline" size={16} color={Colors.muted} />
-                </TouchableOpacity>
-              </View>
-            </View>
-
-
-            {/* FreeLLM */}
-            <View style={styles.providerCard}>
-              <View style={styles.providerHeader}>
-                <Ionicons name="infinite-outline" size={20} color={Colors.primary} />
-                <Text style={styles.providerName}>FreeLLM</Text>
-                <View style={[styles.statusDot, {
-                  backgroundColor: aiProviders.providers.freellm?.available ? Colors.green : Colors.red
-                }]} />
-              </View>
-              <Text style={styles.providerStatus}>
-                {aiProviders.providers.freellm?.message || 'Not configured'}
-              </Text>
-              <View style={styles.providerActions}>
-                <TouchableOpacity
-                  style={[styles.providerButton, aiProviders.current === 'freellm' && styles.activeProvider]}
-                  onPress={() => handleProviderChange('freellm')}
-                >
-                  <Text style={[styles.providerButtonText, aiProviders.current === 'freellm' && styles.activeProviderText]}>
-                    {aiProviders.current === 'freellm' ? 'Active' : 'Use'}
-                  </Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={styles.configButton}
-                  onPress={() => setShowFreellmModal(true)}
-                >
-                  <Ionicons name="settings-outline" size={16} color={Colors.foreground} />
-                </TouchableOpacity>
-              </View>
-            </View>
-
-            {/* Cursor */}
-            <View style={styles.providerCard}>
-              <View style={styles.providerHeader}>
-                <Ionicons name="code-slash-outline" size={20} color={Colors.primary} />
-                <Text style={styles.providerName}>Cursor</Text>
-                <View style={[styles.statusDot, {
-                  backgroundColor: aiProviders.providers.cursor?.available ? Colors.green : Colors.yellow
-                }]} />
-              </View>
-              <Text style={styles.providerStatus}>
-                {aiProviders.providers.cursor?.message || 'Coming soon'}
-              </Text>
-              <TouchableOpacity
-                style={[styles.providerButton, { opacity: 0.5 }]}
-                disabled
-              >
-                <Text style={styles.providerButtonText}>Soon</Text>
-              </TouchableOpacity>
-            </View>
+          <Text style={styles.providerStatus}>
+            {freellmStatus?.message || aiProviders?.providers?.freellm?.message || 'Checking...'}
+          </Text>
+          <View style={styles.providerActions}>
+            <TouchableOpacity
+              style={[styles.providerButton, styles.activeProvider]}
+              disabled
+            >
+              <Text style={[styles.providerButtonText, styles.activeProviderText]}>Active</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.configButton}
+              onPress={() => setShowFreellmModal(true)}
+            >
+              <Ionicons name="settings-outline" size={16} color={Colors.foreground} />
+            </TouchableOpacity>
           </View>
-        )}
+        </View>
       </View>
 
       {/* Actions */}
@@ -544,7 +338,7 @@ export default function SettingsScreen() {
 
         <TouchableOpacity style={styles.actionButton} onPress={loadAIStatus}>
           <Ionicons name="sparkles-outline" size={22} color={Colors.foreground} />
-          <Text style={styles.actionButtonText}>Refresh AI Providers</Text>
+          <Text style={styles.actionButtonText}>Refresh AI Status</Text>
         </TouchableOpacity>
 
         <TouchableOpacity style={[styles.actionButton, styles.dangerButton]} onPress={handleDisconnect}>
@@ -567,55 +361,7 @@ export default function SettingsScreen() {
 
       <View style={styles.bottomPadding} />
 
-      {/* GitHub Token Modal */}
-      <Modal visible={showGitHubTokenModal} transparent animationType="slide">
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>GitHub Token</Text>
-              <TouchableOpacity onPress={() => setShowGitHubTokenModal(false)}>
-                <Ionicons name="close" size={24} color={Colors.muted} />
-              </TouchableOpacity>
-            </View>
-            <Text style={styles.modalDescription}>
-              Paste a GitHub Personal Access Token (classic) with Copilot access. This fixes
-              "Copilot subscription required" when gh CLI is not logged in on the PC. Create at
-              github.com/settings/tokens — enable Copilot scope if available.
-            </Text>
-            <TextInput
-              style={styles.modalInput}
-              placeholder="ghp_xxxxxxxxxxxxxxxxxxxx"
-              placeholderTextColor={Colors.muted}
-              value={githubTokenInput}
-              onChangeText={setGithubTokenInput}
-              secureTextEntry
-              autoCapitalize="none"
-              autoCorrect={false}
-            />
-            <View style={styles.modalActions}>
-              <TouchableOpacity
-                style={[styles.modalButton, styles.modalSecondaryButton]}
-                onPress={() => setShowGitHubTokenModal(false)}
-              >
-                <Text style={styles.modalSecondaryButtonText}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.modalButton} onPress={handleGitHubToken}>
-                <Text style={styles.modalButtonText}>Save Token</Text>
-              </TouchableOpacity>
-            </View>
-            {githubTokenStatus?.success && (
-              <TouchableOpacity
-                style={styles.clearTokenButton}
-                onPress={handleClearGitHubToken}
-              >
-                <Text style={styles.clearTokenText}>Clear Current Token</Text>
-              </TouchableOpacity>
-            )}
-          </View>
-        </View>
-      </Modal>
-
-
+      {/* FreeLLM Config Modal */}
       <Modal visible={showFreellmModal} transparent animationType="slide">
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
@@ -664,116 +410,6 @@ export default function SettingsScreen() {
         </View>
       </Modal>
 
-      {/* Ollama Modal */}
-      <Modal visible={showOllamaModal} transparent animationType="slide">
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Ollama Configuration</Text>
-              <TouchableOpacity onPress={() => setShowOllamaModal(false)}>
-                <Ionicons name="close" size={24} color={Colors.muted} />
-              </TouchableOpacity>
-            </View>
-            <Text style={styles.modalDescription}>
-              Configure your local Ollama instance settings.
-            </Text>
-
-            <Text style={styles.inputLabel}>Host URL:</Text>
-            <TextInput
-              style={styles.modalInput}
-              placeholder="http://localhost:11434"
-              placeholderTextColor={Colors.muted}
-              value={ollamaHostInput}
-              onChangeText={setOllamaHostInput}
-              autoCapitalize="none"
-              autoCorrect={false}
-            />
-
-            <Text style={styles.inputLabel}>Model:</Text>
-            <TextInput
-              style={styles.modalInput}
-              placeholder="llama3.2"
-              placeholderTextColor={Colors.muted}
-              value={ollamaModelInput}
-              onChangeText={setOllamaModelInput}
-              autoCapitalize="none"
-              autoCorrect={false}
-            />
-
-            <View style={styles.modalActions}>
-              <TouchableOpacity
-                style={[styles.modalButton, styles.modalSecondaryButton]}
-                onPress={() => setShowOllamaModal(false)}
-              >
-                <Text style={styles.modalSecondaryButtonText}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.modalButton} onPress={handleOllamaConfig}>
-                <Text style={styles.modalButtonText}>Save Config</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
-
-      {/* Copilot Model Selection Modal */}
-      <Modal visible={showCopilotModelModal} transparent animationType="slide">
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Copilot Model Selection</Text>
-              <TouchableOpacity onPress={() => setShowCopilotModelModal(false)}>
-                <Ionicons name="close" size={24} color={Colors.muted} />
-              </TouchableOpacity>
-            </View>
-
-            <Text style={styles.modalDescription}>
-              Choose which AI model to use with GitHub Copilot CLI. Each model has different strengths for coding tasks.
-            </Text>
-
-            <View style={{marginBottom: 16}}>
-              <Text style={styles.inputLabel}>Current Model: {copilotModels?.current || 'Loading...'}</Text>
-            </View>
-
-            {copilotModels?.models && Object.entries(copilotModels.models as Record<string, string[]>).map(([category, models]) => (
-              <View key={category} style={{marginBottom: 16}}>
-                <Text style={[styles.inputLabel, {marginBottom: 8}]}>{category}</Text>
-                {models.map((model: string) => (
-                  <TouchableOpacity
-                    key={model}
-                    style={[
-                      styles.modalButton,
-                      {
-                        marginBottom: 8,
-                        backgroundColor: copilotModels.current === model ? Colors.primary : Colors.cardLight,
-                        borderColor: copilotModels.current === model ? Colors.primary : Colors.border
-                      }
-                    ]}
-                    onPress={() => handleCopilotModelChange(model)}
-                  >
-                    <Text style={[
-                      styles.modalButtonText,
-                      { color: copilotModels.current === model ? Colors.background : Colors.foreground }
-                    ]}>
-                      {model}
-                      {copilotModels.current === model && ' ✓'}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-            ))}
-
-            <View style={styles.modalActions}>
-              <TouchableOpacity
-                style={[styles.modalButton, styles.modalSecondaryButton]}
-                onPress={() => setShowCopilotModelModal(false)}
-              >
-                <Text style={styles.modalSecondaryButtonText}>Close</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
-
       {/* Server URL Modal */}
       <Modal visible={showServerUrlModal} transparent animationType="slide">
         <View style={styles.modalOverlay}>
@@ -785,11 +421,11 @@ export default function SettingsScreen() {
               </TouchableOpacity>
             </View>
             <Text style={styles.modalDescription}>
-              Enter your backend server URL (e.g. ngrok HTTPS URL or public server domain).
+              Enter your backend server URL (your PC's LAN IP or ngrok HTTPS URL).
             </Text>
             <TextInput
               style={styles.modalInput}
-              placeholder="https://your-server.ngrok-free.dev"
+              placeholder="https://neo-api-oths.onrender.com"
               placeholderTextColor={Colors.muted}
               value={serverUrlInput}
               onChangeText={setServerUrlInput}
@@ -807,6 +443,47 @@ export default function SettingsScreen() {
                 <Text style={styles.modalButtonText}>Save URL</Text>
               </TouchableOpacity>
             </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Device Command Modal */}
+      <Modal visible={showCommandModal} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Run Command</Text>
+              <TouchableOpacity onPress={() => { setShowCommandModal(false); setCommandResult(null); }}>
+                <Ionicons name="close" size={24} color={Colors.muted} />
+              </TouchableOpacity>
+            </View>
+            <TextInput
+              style={styles.modalInput}
+              placeholder="Enter command..."
+              placeholderTextColor={Colors.muted}
+              value={deviceCommand}
+              onChangeText={setDeviceCommand}
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+            <TouchableOpacity
+              style={[styles.modalButton, { marginBottom: 12 }, executingCommand && { opacity: 0.6 }]}
+              onPress={handleDeviceCommand}
+              disabled={executingCommand}
+            >
+              {executingCommand ? (
+                <ActivityIndicator size="small" color={Colors.background} />
+              ) : (
+                <Text style={styles.modalButtonText}>Execute</Text>
+              )}
+            </TouchableOpacity>
+            {commandResult && (
+              <View style={{ backgroundColor: Colors.cardLight, borderRadius: 8, padding: 12, maxHeight: 200 }}>
+                <ScrollView>
+                  <Text style={{ fontSize: 12, fontFamily: 'monospace', color: Colors.foreground, lineHeight: 18 }}>{commandResult}</Text>
+                </ScrollView>
+              </View>
+            )}
           </View>
         </View>
       </Modal>
@@ -860,7 +537,6 @@ const styles = StyleSheet.create({
 
   // AI Provider Styles
   sectionHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 },
-  providerGrid: { gap: 12 },
   providerCard: {
     backgroundColor: Colors.card,
     borderRadius: 12,
@@ -924,6 +600,4 @@ const styles = StyleSheet.create({
   modalSecondaryButton: { backgroundColor: Colors.cardLight, borderWidth: 1, borderColor: Colors.border },
   modalButtonText: { color: Colors.background, fontSize: 16, fontWeight: '600' },
   modalSecondaryButtonText: { color: Colors.foreground, fontSize: 16, fontWeight: '600' },
-  clearTokenButton: { marginTop: 12, padding: 8, alignItems: 'center' },
-  clearTokenText: { color: Colors.red, fontSize: 14, fontWeight: '500' },
 });

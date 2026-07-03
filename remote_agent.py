@@ -35,7 +35,7 @@ except ImportError:
     import websockets
 
 # Configuration
-DEFAULT_SERVER = "wss://your-jarvis-server.railway.app"
+DEFAULT_SERVER = "wss://neo-api-oths.onrender.com"
 RECONNECT_DELAY = 5  # seconds
 MAX_RECONNECT_ATTEMPTS = 10
 COMMAND_TIMEOUT = 120  # seconds
