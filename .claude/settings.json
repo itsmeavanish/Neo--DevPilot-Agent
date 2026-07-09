@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh issue create --title 'Fix: FreeLLM API key regenerates on every Render wake-up' --body ' *)",
+      "Bash(gh issue *)",
+      "Bash(curl -s --max-time 3 http://172.19.80.1:8000/api/v1/mobile/project/ai/providers)",
+      "Bash(curl -s --max-time 3 http://172.19.80.1:8000/health)",
+      "Bash(curl -s --max-time 3 http://172.19.80.1:3001/api/ping)",
+      "Bash(curl -s --max-time 3 http://localhost:3001/api/ping)",
+      "Bash(curl -s --max-time 3 http://127.0.0.1:3001/api/ping)",
+      "Bash(curl -s --max-time 3 http://172.19.80.1:8000/)",
+      "Bash(curl -s --max-time 3 http://172.19.80.1:8000/api/v1/ws/agents/)",
+      "Bash(python -c ' *)",
+      "Bash(curl -s --max-time 30 -X POST http://10.81.55.139:8000/project/ai/ask -H 'Content-Type: application/json' -d '{\"prompt\":\"Say hi in one word\",\"session_id\":null}')",
+      "Bash(curl -s http://localhost:3001/api/settings/api-key)",
+      "Bash(netstat -aon)",
+      "Bash(taskkill //PID 12584 //F)",
+      "Bash(taskkill //PID 17288 //F)",
+      "Bash(python -m jarvis.main)",
+      "Bash(npx tsc *)",
+      "Bash(python -c \"import sys; sys.path.insert\\(0, 'src'\\); from jarvis.api.v1.mobile.external_agents import router; print\\('Imports successful'\\)\")",
+      "Bash(python -c \"import sys; sys.path.insert\\(0, 'src'\\); from jarvis.api.v1.mobile.agent_stream import router; print\\('SUCCESS: agent_stream.py imports correctly'\\)\")",
+      "Bash(python -c \"import sys; sys.path.insert\\(0, 'src'\\); from jarvis.api.v1.mobile.external_agents import router, run_jules_agent; print\\('✓ Jules endpoint imports successfully'\\); print\\('✓ run_jules_agent function:', run_jules_agent.__name__\\)\")",
+      "Bash(python -c \"import sys; sys.path.insert\\(0, 'src'\\); from jarvis.api.v1.mobile.external_agents import router, run_jules_agent; print\\('Jules endpoint imports successfully'\\); print\\('run_jules_agent function:', run_jules_agent.__name__\\)\")",
+      "Bash(python -c \"import sys; sys.path.insert\\(0, 'src'\\); from jarvis.api.v1.mobile.external_agents import router, _cleanup_temp; print\\('All imports successful'\\)\")"
+    ]
+  }
+}

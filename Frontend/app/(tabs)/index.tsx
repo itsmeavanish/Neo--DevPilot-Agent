@@ -10,6 +10,7 @@ import {
   Platform,
   ActivityIndicator,
   Modal,
+  Animated,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
@@ -36,6 +37,15 @@ interface Message {
   content: string;
   timestamp: Date;
   isError?: boolean;
+  thinkingSteps?: ThinkingStep[];
+  _expanded?: boolean;
+}
+
+interface ThinkingStep {
+  type: 'thinking' | 'tool_call' | 'tool_result';
+  content: string;
+  tool?: string;
+  timestamp: number;
 }
 
 interface FileContext {
@@ -78,12 +88,28 @@ export default function ChatScreen() {
   // Conversational session state
   const [sessionId, setSessionId] = useState<string | undefined>(undefined);
   const [streamingMsgId, setStreamingMsgId] = useState<string | null>(null);
+  const [thinkingSteps, setThinkingSteps] = useState<ThinkingStep[]>([]);
+  const [showThinking, setShowThinking] = useState(false);
   const cancelStreamRef = useRef<(() => void) | null>(null);
   const scrollViewRef = useRef<ScrollView>(null);
+  const pulseAnim = useRef(new Animated.Value(0.4)).current;
 
   useEffect(() => {
     scrollViewRef.current?.scrollToEnd({ animated: true });
-  }, [messages]);
+  }, [messages, thinkingSteps]);
+
+  useEffect(() => {
+    if (thinkingSteps.length > 0) {
+      const loop = Animated.loop(
+        Animated.sequence([
+          Animated.timing(pulseAnim, { toValue: 1, duration: 800, useNativeDriver: true }),
+          Animated.timing(pulseAnim, { toValue: 0.4, duration: 800, useNativeDriver: true }),
+        ])
+      );
+      loop.start();
+      return () => loop.stop();
+    }
+  }, [thinkingSteps.length > 0]);
 
   useEffect(() => {
     // Load current AI provider
@@ -118,22 +144,46 @@ export default function ChatScreen() {
   const sendStreaming = useCallback(
     (userText: string) => {
       const msgId = Date.now().toString() + Math.random().toString(36).slice(2);
+      const steps: ThinkingStep[] = [];
       // Add placeholder assistant message
       setMessages((prev) => [
         ...prev,
         { id: msgId, role: 'assistant', content: '', timestamp: new Date(), isError: false },
       ]);
       setStreamingMsgId(msgId);
+      setThinkingSteps([]);
+      setShowThinking(true);
 
       const cancel = chatWithAgentStream(userText, [], sessionId, {
         onSessionId: (sid) => {
           if (!sessionId) setSessionId(sid);
         },
+        onThinking: (content) => {
+          const step: ThinkingStep = { type: 'thinking', content, timestamp: Date.now() };
+          steps.push(step);
+          setThinkingSteps([...steps]);
+        },
+        onToolCall: (tool, _args) => {
+          const step: ThinkingStep = { type: 'tool_call', content: `Using ${tool}`, tool, timestamp: Date.now() };
+          steps.push(step);
+          setThinkingSteps([...steps]);
+        },
+        onToolResult: (tool, result) => {
+          const status = (result as { status?: string })?.status === 'success' ? 'completed' : 'done';
+          const step: ThinkingStep = { type: 'tool_result', content: `${tool} ${status}`, tool, timestamp: Date.now() };
+          steps.push(step);
+          setThinkingSteps([...steps]);
+        },
         onChunk: (chunk) => {
           updateMessage(msgId, (prev) => prev + chunk);
         },
         onDone: (_fullText) => {
+          setMessages((prev) =>
+            prev.map((m) => (m.id === msgId ? { ...m, thinkingSteps: steps.length > 0 ? [...steps] : undefined } : m))
+          );
           setStreamingMsgId(null);
+          setThinkingSteps([]);
+          setShowThinking(false);
           setIsLoading(false);
           cancelStreamRef.current = null;
         },
@@ -143,6 +193,8 @@ export default function ChatScreen() {
             prev.map((m) => (m.id === msgId ? { ...m, isError: true } : m))
           );
           setStreamingMsgId(null);
+          setThinkingSteps([]);
+          setShowThinking(false);
           setIsLoading(false);
           cancelStreamRef.current = null;
         },
@@ -183,7 +235,23 @@ export default function ChatScreen() {
       // Handle different command types (case-insensitive matching)
       const lowerText = text.toLowerCase();
 
-      if (text.startsWith('!')) {
+      // Natural language: "open X in VS Code" / "open X folder in code" / "open X in new VS Code"
+      const openInVSCodeMatch = lowerText.match(
+        /^open\s+(.+?)\s+(?:folder\s+)?(?:in\s+)?(?:new\s+)?(?:vs\s*code|vscode|code)\s*$/
+      );
+      // Also match "open VS Code with X" / "open code in X"
+      const openVSCodeWithMatch = !openInVSCodeMatch
+        ? lowerText.match(/^open\s+(?:vs\s*code|vscode|code)\s+(?:in|with|at|for)\s+(.+?)\s*$/)
+        : null;
+
+      if (openInVSCodeMatch || openVSCodeWithMatch) {
+        const folderPath = (openInVSCodeMatch?.[1] || openVSCodeWithMatch?.[1] || '').trim();
+        const res = await openProject(folderPath);
+        addMessage('assistant', res.message || `Opening ${folderPath} in VS Code. Redirecting to IDE...`, res.status !== 'success');
+        if (res.status === 'success') {
+          setTimeout(() => router.push({ pathname: '/ide', params: { openPath: folderPath } }), 500);
+        }
+      } else if (text.startsWith('!')) {
         // Shell command: !node -v
         const cmd = text.slice(1).trim();
         if (!cmd) {
@@ -342,28 +410,84 @@ export default function ChatScreen() {
         showsVerticalScrollIndicator={false}
       >
         {messages.map((msg) => (
-          <View
-            key={msg.id}
-            style={[
-              styles.messageBubble,
-              msg.role === 'user' ? styles.userBubble : styles.assistantBubble,
-              msg.isError && styles.errorBubble,
-            ]}
-          >
-            <Text style={[styles.messageText, msg.isError && styles.errorText]}>{msg.content}</Text>
-            <View style={styles.messageFooter}>
-              <Text style={styles.timestamp}>
-                {msg.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-              </Text>
-              {msg.role === 'assistant' && (
-                <TouchableOpacity onPress={() => copyToClipboard(msg.content)} style={styles.copyBtn}>
-                  <Ionicons name="copy-outline" size={14} color={Colors.muted} />
-                </TouchableOpacity>
-              )}
+          <View key={msg.id}>
+            {/* Collapsible thinking steps for completed messages */}
+            {msg.thinkingSteps && msg.thinkingSteps.length > 0 && msg.id !== streamingMsgId && (
+              <TouchableOpacity
+                style={styles.stepsToggle}
+                onPress={() => {
+                  setMessages((prev) =>
+                    prev.map((m) =>
+                      m.id === msg.id ? { ...m, _expanded: !m._expanded } : m
+                    )
+                  );
+                }}
+              >
+                <Ionicons
+                  name={msg._expanded ? 'chevron-down' : 'chevron-forward'}
+                  size={14}
+                  color={Colors.purple}
+                />
+                <Text style={styles.stepsToggleText}>
+                  {msg.thinkingSteps.length} step{msg.thinkingSteps.length > 1 ? 's' : ''}
+                </Text>
+              </TouchableOpacity>
+            )}
+            {msg.thinkingSteps && msg._expanded && (
+              <View style={styles.stepsContainer}>
+                {msg.thinkingSteps.map((step, i) => (
+                  <View key={i} style={styles.stepRow}>
+                    <Ionicons
+                      name={step.type === 'thinking' ? 'bulb-outline' : step.type === 'tool_call' ? 'hammer-outline' : 'checkmark-circle-outline'}
+                      size={12}
+                      color={step.type === 'thinking' ? Colors.yellow : step.type === 'tool_call' ? Colors.cyan : Colors.green}
+                    />
+                    <Text style={styles.stepText} numberOfLines={2}>{step.content}</Text>
+                  </View>
+                ))}
+              </View>
+            )}
+            <View
+              style={[
+                styles.messageBubble,
+                msg.role === 'user' ? styles.userBubble : styles.assistantBubble,
+                msg.isError && styles.errorBubble,
+              ]}
+            >
+              <Text style={[styles.messageText, msg.isError && styles.errorText]}>{msg.content}</Text>
+              <View style={styles.messageFooter}>
+                <Text style={styles.timestamp}>
+                  {msg.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                </Text>
+                {msg.role === 'assistant' && (
+                  <TouchableOpacity onPress={() => copyToClipboard(msg.content)} style={styles.copyBtn}>
+                    <Ionicons name="copy-outline" size={14} color={Colors.muted} />
+                  </TouchableOpacity>
+                )}
+              </View>
             </View>
           </View>
         ))}
-        {isLoading && !streamingMsgId && (
+        {/* Live thinking indicator while streaming */}
+        {showThinking && thinkingSteps.length > 0 && (
+          <View style={styles.thinkingContainer}>
+            <Animated.View style={[styles.thinkingHeader, { opacity: pulseAnim }]}>
+              <ActivityIndicator size="small" color={Colors.purple} />
+              <Text style={styles.thinkingTitle}>Thinking...</Text>
+            </Animated.View>
+            {thinkingSteps.slice(-4).map((step, i) => (
+              <View key={i} style={styles.thinkingStep}>
+                <Ionicons
+                  name={step.type === 'thinking' ? 'bulb-outline' : step.type === 'tool_call' ? 'hammer-outline' : 'checkmark-circle-outline'}
+                  size={12}
+                  color={step.type === 'thinking' ? Colors.yellow : step.type === 'tool_call' ? Colors.cyan : Colors.green}
+                />
+                <Text style={styles.thinkingStepText} numberOfLines={1}>{step.content}</Text>
+              </View>
+            ))}
+          </View>
+        )}
+        {isLoading && !streamingMsgId && thinkingSteps.length === 0 && (
           <View style={[styles.messageBubble, styles.assistantBubble]}>
             <View style={styles.loadingRow}>
               <ActivityIndicator size="small" color={Colors.primary} />
@@ -505,6 +629,74 @@ const styles = StyleSheet.create({
   loadingText: {
     color: Colors.muted,
     fontSize: FontSize.sm,
+  },
+  thinkingContainer: {
+    alignSelf: 'flex-start',
+    maxWidth: '85%',
+    backgroundColor: Colors.purpleBg,
+    borderWidth: 1,
+    borderColor: Colors.purple + '30',
+    borderRadius: BorderRadius.lg,
+    padding: Spacing.md,
+    marginBottom: Spacing.md,
+  },
+  thinkingHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+    marginBottom: Spacing.sm,
+  },
+  thinkingTitle: {
+    color: Colors.purple,
+    fontSize: FontSize.sm,
+    fontWeight: '600',
+  },
+  thinkingStep: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+    paddingVertical: 3,
+    paddingLeft: Spacing.xs,
+  },
+  thinkingStepText: {
+    color: Colors.muted,
+    fontSize: FontSize.xs,
+    flex: 1,
+  },
+  stepsToggle: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    alignSelf: 'flex-start',
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.xs,
+    marginBottom: 2,
+  },
+  stepsToggleText: {
+    color: Colors.purple,
+    fontSize: FontSize.xs,
+    fontWeight: '500',
+  },
+  stepsContainer: {
+    alignSelf: 'flex-start',
+    maxWidth: '85%',
+    backgroundColor: Colors.purpleBg,
+    borderWidth: 1,
+    borderColor: Colors.purple + '20',
+    borderRadius: BorderRadius.md,
+    padding: Spacing.sm,
+    marginBottom: Spacing.xs,
+  },
+  stepRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+    paddingVertical: 2,
+  },
+  stepText: {
+    color: Colors.muted,
+    fontSize: FontSize.xs,
+    flex: 1,
   },
   quickActions: {
     flexDirection: 'row',

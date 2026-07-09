@@ -11,54 +11,31 @@ import {
   Platform,
   ActivityIndicator,
   Alert,
-  Dimensions,
   Modal,
   Animated,
   useWindowDimensions,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useLocalSearchParams } from 'expo-router';
 import {
   listDirectory,
   readFile,
   writeFile,
   runSystemCommand,
-  copilotEdit,
-  askAI,
-  getCurrentWorkingDirectory,
-  getAIProviders,
-  runIDEAgentAction,
   ideAgentStream,
   claudeCodeStream,
   runJulesAgent,
+  getCurrentWorkingDirectory,
   FileInfo,
-  CopilotEditResponse,
 } from '@/lib/api';
 import configManager from '@/lib/config';
+import { Colors, Spacing, FontSize, BorderRadius } from '@/lib/theme';
 
-// VS Code Dark Theme Colors
-const VSColors = {
-  bg: '#1e1e1e',
-  sidebar: '#252526',
-  activityBar: '#333333',
-  editor: '#1e1e1e',
-  terminal: '#1e1e1e',
-  border: '#3c3c3c',
-  text: '#cccccc',
-  textMuted: '#808080',
-  accent: '#007acc',
-  accentLight: '#1177bb',
-  success: '#4ec9b0',
-  error: '#f14c4c',
-  warning: '#cca700',
-  lineNumber: '#858585',
-  selection: '#264f78',
-  hover: '#2a2d2e',
-  inputBg: '#3c3c3c',
-  white: '#ffffff',
-};
+let _idCounter = 0;
+const uid = (prefix: string) => `${prefix}-${Date.now()}-${++_idCounter}`;
 
+// Types
 interface OpenTab {
   path: string;
   name: string;
@@ -72,139 +49,164 @@ interface ChatMessage {
   role: 'user' | 'assistant' | 'system';
   content: string;
   isError?: boolean;
-  diff?: string;
-  filePath?: string;
   isThinking?: boolean;
   isToolCall?: boolean;
   toolName?: string;
   toolArgs?: Record<string, unknown>;
   toolResult?: Record<string, unknown>;
   durationMs?: number;
+  step?: number;
 }
+
+interface TerminalLine {
+  id: string;
+  type: 'command' | 'output' | 'error';
+  content: string;
+}
+
+type AgentType = 'freellm' | 'claude_code' | 'jules';
+type PanelType = 'files' | 'terminal' | 'agent';
 
 // Responsive breakpoints
 const MOBILE_BREAKPOINT = 768;
 const TABLET_BREAKPOINT = 1024;
+const ACTIVITY_BAR_WIDTH = 44;
 
 export default function IDEScreen() {
-  const router = useRouter();
   const params = useLocalSearchParams<{ openPath?: string }>();
   const { width: windowWidth, height: windowHeight } = useWindowDimensions();
 
   // Responsive helpers
   const isMobile = windowWidth < MOBILE_BREAKPOINT;
   const isTablet = windowWidth >= MOBILE_BREAKPOINT && windowWidth < TABLET_BREAKPOINT;
+  const isDesktop = windowWidth >= TABLET_BREAKPOINT;
 
-  // State
+  // File explorer state
   const [currentPath, setCurrentPath] = useState(params.openPath || '.');
   const [files, setFiles] = useState<FileInfo[]>([]);
   const [loadingFiles, setLoadingFiles] = useState(false);
+  const [showHidden, setShowHidden] = useState(false);
+
+  // Editor state
   const [openTabs, setOpenTabs] = useState<OpenTab[]>([]);
   const [activeTab, setActiveTab] = useState<string | null>(null);
   const [loadingContent, setLoadingContent] = useState(false);
-  const [showHidden, setShowHidden] = useState(false);
 
   // Terminal state
-  const [terminalOutput, setTerminalOutput] = useState('$ Welcome to JARVIS Terminal\n');
+  const [terminalLines, setTerminalLines] = useState<TerminalLine[]>([
+    { id: '0', type: 'output', content: 'Welcome to JARVIS Terminal' },
+  ]);
   const [terminalCommand, setTerminalCommand] = useState('');
   const [runningCommand, setRunningCommand] = useState(false);
 
-  // Copilot Chat state
+  // AI Agent state
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
     {
       id: '1',
       role: 'assistant',
       content:
-        'AI Agent ready. I have full access to your workspace.\n\n' +
-        '• I can read, write, and create files\n' +
-        '• I can run terminal commands and git operations\n' +
-        '• I can refactor, fix bugs, and implement features\n\n' +
-        'Open a folder and ask me anything — like Cursor.',
+        '👋 AI Agent ready. I have full access to your workspace.\n\n' +
+        '• Read, write, and create files\n' +
+        '• Run terminal commands and git operations\n' +
+        '• Refactor, fix bugs, and implement features\n\n' +
+        'Open a folder and ask me anything.',
     },
   ]);
   const [chatInput, setChatInput] = useState('');
   const [loadingChat, setLoadingChat] = useState(false);
-  const [pendingEdit, setPendingEdit] = useState<CopilotEditResponse | null>(null);
-  const [agentMode, setAgentMode] = useState(true);
-  const [aiProviderLabel, setAiProviderLabel] = useState('');
+  const [selectedAgent, setSelectedAgent] = useState<AgentType>('freellm');
+  const [showAgentPicker, setShowAgentPicker] = useState(false);
   const [agentSessionId, setAgentSessionId] = useState<string | undefined>();
   const abortAgentRef = useRef<(() => void) | null>(null);
+  const [thinkingSteps, setThinkingSteps] = useState<ChatMessage[]>([]);
+  const [showThinkingDetails, setShowThinkingDetails] = useState(true);
 
-  // Agent selector: 'freellm' | 'claude_code' | 'jules'
-  const [selectedAgent, setSelectedAgent] = useState<'freellm' | 'claude_code' | 'jules'>('freellm');
-  const [showAgentPicker, setShowAgentPicker] = useState(false);
-
-  // UI state - responsive
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(isMobile);
-  const [showCopilotPanel, setShowCopilotPanel] = useState(!isMobile);
-  const [showTerminal, setShowTerminal] = useState(!isMobile);
-  const [activeBottomPanel, setActiveBottomPanel] = useState<'terminal' | 'copilot' | null>(isMobile ? null : 'terminal');
-  const [sidebarWidth] = useState(new Animated.Value(isMobile ? 0 : 180));
-  const [showOpenFolder, setShowOpenFolder] = useState(false);
+  // UI state
+  const [activePanel, setActivePanel] = useState<PanelType | null>(isMobile ? null : 'files');
+  const [showExplorer, setShowExplorer] = useState(!isMobile);
+  const [showTerminalPanel, setShowTerminalPanel] = useState(false);
+  const [showAgentPanel, setShowAgentPanel] = useState(!isMobile);
+  const [showOpenFolderModal, setShowOpenFolderModal] = useState(false);
   const [folderInput, setFolderInput] = useState(currentPath);
-  const [activePanel, setActivePanel] = useState<'files' | 'search' | 'git'>('files');
 
+  // Animation values
+  const explorerWidth = useRef(new Animated.Value(isMobile ? 0 : 240)).current;
+  const agentPanelHeight = useRef(new Animated.Value(isMobile ? 0 : 350)).current;
+  const terminalPanelHeight = useRef(new Animated.Value(0)).current;
+
+  // Refs
   const terminalScrollRef = useRef<ScrollView>(null);
   const chatScrollRef = useRef<ScrollView>(null);
 
+  // Initialize workspace
   useEffect(() => {
-    void (async () => {
+    const init = async () => {
       try {
         await configManager.init();
-        const p = await getAIProviders();
-        const cur = p.providers?.[p.current];
-        setAiProviderLabel(
-          cur?.available
-            ? `${p.current} ✓`
-            : `${p.current} (fallback)`
-        );
-      } catch {
-        setAiProviderLabel('');
-      }
-    })();
-  }, []);
-
-  // Initialize current path dynamically
-  useEffect(() => {
-    const initializePath = async () => {
-      if (!params.openPath) {
-        try {
+        if (!params.openPath) {
           const workingDir = await getCurrentWorkingDirectory();
           setCurrentPath(workingDir);
           setFolderInput(workingDir);
-          loadDirectory(workingDir);
-        } catch (error) {
-          console.warn('Failed to get working directory, using fallback');
-          loadDirectory('.');
+          await loadDirectory(workingDir);
+        } else {
+          await loadDirectory(params.openPath);
         }
-      } else {
-        loadDirectory(params.openPath);
+      } catch (error) {
+        console.warn('Failed to initialize workspace:', error);
+        await loadDirectory('.');
       }
     };
+    init();
+  }, [params.openPath]);
 
-    initializePath();
-  }, []);
-
-  // Toggle sidebar with animation
-  const toggleSidebar = useCallback(() => {
-    const newCollapsed = !sidebarCollapsed;
-    setSidebarCollapsed(newCollapsed);
-    Animated.timing(sidebarWidth, {
-      toValue: newCollapsed ? 0 : (isMobile ? windowWidth * 0.7 : 180),
-      duration: 200,
-      useNativeDriver: false,
-    }).start();
-  }, [sidebarCollapsed, isMobile, windowWidth, sidebarWidth]);
-
-  // Toggle mobile bottom panels
-  const toggleBottomPanel = useCallback((panel: 'terminal' | 'copilot') => {
-    if (isMobile) {
-      setActiveBottomPanel(prev => prev === panel ? null : panel);
-    } else {
-      if (panel === 'terminal') setShowTerminal(prev => !prev);
-      if (panel === 'copilot') setShowCopilotPanel(prev => !prev);
+  // Toggle panels with animation
+  const toggleExplorer = useCallback(() => {
+    const newState = !showExplorer;
+    setShowExplorer(newState);
+    if (isMobile && newState) {
+      setShowTerminalPanel(false);
+      setShowAgentPanel(false);
+      setActivePanel('files');
     }
-  }, [isMobile]);
+    Animated.spring(explorerWidth, {
+      toValue: newState ? (isMobile ? windowWidth * 0.75 : 240) : 0,
+      useNativeDriver: false,
+      tension: 80,
+      friction: 12,
+    }).start();
+  }, [showExplorer, isMobile, windowWidth]);
+
+  const toggleTerminal = useCallback(() => {
+    const newState = !showTerminalPanel;
+    setShowTerminalPanel(newState);
+    if (isMobile && newState) {
+      setShowExplorer(false);
+      setShowAgentPanel(false);
+      setActivePanel('terminal');
+    }
+    Animated.spring(terminalPanelHeight, {
+      toValue: newState ? (isMobile ? windowHeight * 0.5 : 280) : 0,
+      useNativeDriver: false,
+      tension: 80,
+      friction: 12,
+    }).start();
+  }, [showTerminalPanel, isMobile, windowHeight]);
+
+  const toggleAgent = useCallback(() => {
+    const newState = !showAgentPanel;
+    setShowAgentPanel(newState);
+    if (isMobile && newState) {
+      setShowExplorer(false);
+      setShowTerminalPanel(false);
+      setActivePanel('agent');
+    }
+    Animated.spring(agentPanelHeight, {
+      toValue: newState ? (isMobile ? windowHeight * 0.6 : 400) : 0,
+      useNativeDriver: false,
+      tension: 80,
+      friction: 12,
+    }).start();
+  }, [showAgentPanel, isMobile, windowHeight]);
 
   // Load directory
   const loadDirectory = useCallback(async (path: string) => {
@@ -216,33 +218,38 @@ export default function IDEScreen() {
       } else {
         setFiles(result.files);
         setCurrentPath(result.path);
+        setFolderInput(result.path);
       }
     } catch (err) {
-      Alert.alert('Error', err instanceof Error ? err.message : 'Failed to load');
+      Alert.alert('Error', err instanceof Error ? err.message : 'Failed to load directory');
     } finally {
       setLoadingFiles(false);
     }
   }, [showHidden]);
 
-  useEffect(() => {
-    if (params.openPath) {
-      setCurrentPath(params.openPath);
-      setFolderInput(params.openPath);
-      loadDirectory(params.openPath);
+  // Navigate up
+  const goUp = useCallback(() => {
+    const separator = currentPath.includes('\\') ? '\\' : '/';
+    const parent = currentPath.substring(0, currentPath.lastIndexOf(separator));
+    if (parent && parent !== currentPath) {
+      loadDirectory(parent);
     }
-  }, [params.openPath]);
+  }, [currentPath, loadDirectory]);
 
-  // Open file in tab
-  const openFile = async (file: FileInfo) => {
+  // Open file
+  const openFile = useCallback(async (file: FileInfo) => {
     if (file.is_dir) {
-      loadDirectory(file.path);
+      await loadDirectory(file.path);
       return;
     }
 
-    // Check if already open
     const existing = openTabs.find(t => t.path === file.path);
     if (existing) {
       setActiveTab(file.path);
+      if (isMobile) {
+        setShowExplorer(false);
+        Animated.spring(explorerWidth, { toValue: 0, useNativeDriver: false, tension: 80, friction: 12 }).start();
+      }
       return;
     }
 
@@ -264,37 +271,50 @@ export default function IDEScreen() {
 
       setOpenTabs(prev => [...prev, newTab]);
       setActiveTab(file.path);
+      if (isMobile) {
+        setShowExplorer(false);
+        Animated.spring(explorerWidth, { toValue: 0, useNativeDriver: false, tension: 80, friction: 12 }).start();
+      }
     } catch (err) {
       Alert.alert('Error', err instanceof Error ? err.message : 'Failed to open file');
     } finally {
       setLoadingContent(false);
     }
-  };
+  }, [openTabs, isMobile, loadDirectory]);
 
   // Close tab
-  const closeTab = (path: string) => {
+  const closeTab = useCallback((path: string) => {
     const tab = openTabs.find(t => t.path === path);
     if (tab?.modified) {
       Alert.alert('Unsaved Changes', 'Save before closing?', [
-        { text: 'Discard', style: 'destructive', onPress: () => removeTab(path) },
+        { text: 'Discard', style: 'destructive', onPress: () => {
+          setOpenTabs(prev => prev.filter(t => t.path !== path));
+          if (activeTab === path) {
+            const remaining = openTabs.filter(t => t.path !== path);
+            setActiveTab(remaining.length > 0 ? remaining[remaining.length - 1].path : null);
+          }
+        }},
         { text: 'Cancel', style: 'cancel' },
-        { text: 'Save', onPress: async () => { await saveFile(path); removeTab(path); } },
+        { text: 'Save', onPress: async () => {
+          await saveFile(path);
+          setOpenTabs(prev => prev.filter(t => t.path !== path));
+          if (activeTab === path) {
+            const remaining = openTabs.filter(t => t.path !== path);
+            setActiveTab(remaining.length > 0 ? remaining[remaining.length - 1].path : null);
+          }
+        }},
       ]);
     } else {
-      removeTab(path);
+      setOpenTabs(prev => prev.filter(t => t.path !== path));
+      if (activeTab === path) {
+        const remaining = openTabs.filter(t => t.path !== path);
+        setActiveTab(remaining.length > 0 ? remaining[remaining.length - 1].path : null);
+      }
     }
-  };
-
-  const removeTab = (path: string) => {
-    setOpenTabs(prev => prev.filter(t => t.path !== path));
-    if (activeTab === path) {
-      const remaining = openTabs.filter(t => t.path !== path);
-      setActiveTab(remaining.length > 0 ? remaining[remaining.length - 1].path : null);
-    }
-  };
+  }, [openTabs, activeTab]);
 
   // Save file
-  const saveFile = async (path: string) => {
+  const saveFile = useCallback(async (path: string) => {
     const tab = openTabs.find(t => t.path === path);
     if (!tab) return;
 
@@ -302,48 +322,57 @@ export default function IDEScreen() {
       const result = await writeFile(path, tab.content);
       if (result.success) {
         setOpenTabs(prev => prev.map(t => t.path === path ? { ...t, modified: false } : t));
+        Alert.alert('Success', 'File saved successfully');
       } else {
         Alert.alert('Error', result.message);
       }
     } catch (err) {
-      Alert.alert('Error', err instanceof Error ? err.message : 'Failed to save');
+      Alert.alert('Error', err instanceof Error ? err.message : 'Failed to save file');
     }
-  };
+  }, [openTabs]);
 
-  // Update file content
-  const updateContent = (path: string, content: string) => {
+  // Update content
+  const updateContent = useCallback((path: string, content: string) => {
     setOpenTabs(prev => prev.map(t => t.path === path ? { ...t, content, modified: true } : t));
-  };
+  }, []);
 
   // Run terminal command
-  const runCommand = async () => {
+  const runCommand = useCallback(async () => {
     if (!terminalCommand.trim() || runningCommand) return;
 
     const cmd = terminalCommand.trim();
-    setTerminalOutput(prev => `${prev}$ ${cmd}\n`);
+    setTerminalLines(prev => [...prev, { id: uid('msg'), type: 'command', content: cmd }]);
     setTerminalCommand('');
     setRunningCommand(true);
 
     try {
       const result = await runSystemCommand(cmd);
-      let output = '';
-      if (result.stdout) output += result.stdout;
-      if (result.stderr) output += result.stderr;
-      setTerminalOutput(prev => `${prev}${output}\n`);
+      const output = (result.stdout || '') + (result.stderr || '');
+      if (output) {
+        setTerminalLines(prev => [...prev, {
+          id: uid('msg'),
+          type: result.stderr ? 'error' : 'output',
+          content: output,
+        }]);
+      }
     } catch (err) {
-      setTerminalOutput(prev => `${prev}Error: ${err instanceof Error ? err.message : 'Unknown'}\n`);
+      setTerminalLines(prev => [...prev, {
+        id: uid('msg'),
+        type: 'error',
+        content: err instanceof Error ? err.message : 'Unknown error',
+      }]);
     } finally {
       setRunningCommand(false);
-      terminalScrollRef.current?.scrollToEnd({ animated: true });
+      setTimeout(() => terminalScrollRef.current?.scrollToEnd({ animated: true }), 100);
     }
-  };
+  }, [terminalCommand, runningCommand]);
 
-  // Send Copilot / Agent message
-  const sendCopilotMessage = async () => {
+  // Send agent message
+  const sendCopilotMessage = useCallback(async () => {
     if (!chatInput.trim() || loadingChat) return;
 
     const userMsg: ChatMessage = {
-      id: Date.now().toString(),
+      id: uid('msg'),
       role: 'user',
       content: chatInput,
     };
@@ -351,256 +380,226 @@ export default function IDEScreen() {
     const currentInput = chatInput;
     setChatInput('');
     setLoadingChat(true);
+    setThinkingSteps([]);
 
     try {
-      if (agentMode) {
-        // Full agentic mode — route to selected agent
-        let contextMessage = currentInput;
-        if (activeTab) {
-          const activeFileData = openTabs.find(t => t.path === activeTab);
-          if (activeFileData) {
+      let contextMessage = currentInput;
+      if (activeTab) {
+        const activeFileData = openTabs.find(t => t.path === activeTab);
+        if (activeFileData) {
+          if (selectedAgent === 'claude_code') {
+            // Claude Code uses --cwd for full workspace access.
+            // Just pass the user's request directly — Claude Code reads files itself.
+            // Only mention the current file if one is open so it knows what to focus on.
+            contextMessage = activeTab
+              ? `I'm currently looking at ${activeFileData.name}. ${currentInput}`
+              : currentInput;
+          } else {
             contextMessage = `[Currently editing: ${activeTab}]\n\n${currentInput}`;
           }
         }
+      }
 
-        // Jules agent — async dispatch via GitHub issues
-        if (selectedAgent === 'jules') {
-          setChatMessages(prev => [...prev, {
-            id: `jules-thinking-${Date.now()}`,
-            role: 'system' as const,
-            content: 'Dispatching task to Jules...',
-            isThinking: true,
-          }]);
-
-          try {
-            const result = await runJulesAgent(currentInput, currentPath);
-            setChatMessages(prev => {
-              const without = prev.filter(m => !m.isThinking);
-              return [...without, {
-                id: `jules-${Date.now()}`,
-                role: 'assistant' as const,
-                content: result.success
-                  ? `Task dispatched to Jules.\n\n${result.issue_url ? `Issue: ${result.issue_url}` : result.message}`
-                  : `Failed: ${result.message}`,
-                isError: !result.success,
-              }];
-            });
-          } catch (err) {
-            setChatMessages(prev => {
-              const without = prev.filter(m => !m.isThinking);
-              return [...without, {
-                id: `jules-err-${Date.now()}`,
-                role: 'assistant' as const,
-                content: err instanceof Error ? err.message : 'Jules dispatch failed',
-                isError: true,
-              }];
-            });
-          }
-          setLoadingChat(false);
-          chatScrollRef.current?.scrollToEnd({ animated: true });
-          return;
-        }
-
-        // Add a thinking indicator
-        const thinkingId = `thinking-${Date.now()}`;
+      // Jules agent
+      if (selectedAgent === 'jules') {
+        const thinkingId = uid('jules-thinking');
         setChatMessages(prev => [...prev, {
           id: thinkingId,
           role: 'system',
-          content: selectedAgent === 'claude_code' ? 'Running Claude Code...' : 'Thinking...',
+          content: '🚀 Dispatching task to Jules...',
           isThinking: true,
         }]);
 
-        const agentCallbacks = {
-          onSessionId: (sid: string) => {
-            setAgentSessionId(sid);
-          },
-          onThinking: (content: string, step?: number) => {
-            setChatMessages(prev => prev.map(m =>
-              m.id === thinkingId
-                ? { ...m, content: content || `Reasoning (step ${step || 1})...` }
-                : m
-            ));
-          },
-          onToolCall: (tool: string, args: Record<string, unknown>, step?: number) => {
-            const toolId = `tool-${Date.now()}-${step}`;
-            setChatMessages(prev => {
-              const without = prev.filter(m => m.id !== thinkingId);
-              return [...without, {
-                id: toolId,
-                role: 'system' as const,
-                content: `Using ${tool}`,
-                isToolCall: true,
-                toolName: tool,
-                toolArgs: args,
-              }];
-            });
-          },
-          onToolResult: (tool: string, result: Record<string, unknown>, durationMs?: number) => {
-            setChatMessages(prev => {
-              const lastToolIdx = prev.findLastIndex(m => m.isToolCall && m.toolName === tool);
-              if (lastToolIdx >= 0) {
-                const updated = [...prev];
-                updated[lastToolIdx] = {
-                  ...updated[lastToolIdx],
-                  toolResult: result,
-                  durationMs,
-                  content: `${tool} ${result?.status === 'success' ? '✓' : '✗'} ${durationMs ? `(${durationMs}ms)` : ''}`,
-                };
-                return updated;
-              }
-              return prev;
-            });
-          },
-          onToken: () => {
-            setChatMessages(prev => prev.filter(m => m.id !== thinkingId));
-          },
-          onDone: (fullText: string) => {
-            setChatMessages(prev => {
-              const without = prev.filter(m => m.id !== thinkingId);
-              return [...without, {
-                id: `answer-${Date.now()}`,
-                role: 'assistant' as const,
-                content: fullText || 'Done.',
-              }];
-            });
-            setLoadingChat(false);
-            loadDirectory(currentPath);
-            if (activeTab) {
-              readFile(activeTab, 1000).then(result => {
-                if (!result.error) {
-                  setOpenTabs(prev => prev.map(t =>
-                    t.path === activeTab ? { ...t, content: result.content, modified: false } : t
-                  ));
-                }
-              }).catch(() => {});
-            }
-            chatScrollRef.current?.scrollToEnd({ animated: true });
-          },
-          onError: (error: string) => {
-            setChatMessages(prev => {
-              const without = prev.filter(m => m.id !== thinkingId);
-              return [...without, {
-                id: `error-${Date.now()}`,
-                role: 'assistant' as const,
-                content: error,
-                isError: true,
-              }];
-            });
-            setLoadingChat(false);
-            chatScrollRef.current?.scrollToEnd({ animated: true });
-          },
-          onPipelineStart: (content: string) => {
-            setChatMessages(prev => prev.map(m =>
-              m.id === thinkingId ? { ...m, content } : m
-            ));
-          },
-          onPhaseStart: (phase: string) => {
-            setChatMessages(prev => prev.map(m =>
-              m.id === thinkingId ? { ...m, content: `Phase: ${phase}...` } : m
-            ));
-          },
-        };
-
-        // Route to FreeLLM or Claude Code based on selection
-        let abort: () => void;
-        if (selectedAgent === 'claude_code') {
-          abort = claudeCodeStream(contextMessage, currentPath, agentCallbacks);
-        } else {
-          abort = ideAgentStream(contextMessage, currentPath, agentCallbacks, { sessionId: agentSessionId });
+        try {
+          const result = await runJulesAgent(currentInput, currentPath);
+          setChatMessages(prev => {
+            const without = prev.filter(m => m.id !== thinkingId);
+            return [...without, {
+              id: uid('jules'),
+              role: 'assistant',
+              content: result.success
+                ? `✓ Task dispatched to Jules.\n\n${result.issue_url ? `Issue: ${result.issue_url}` : result.message}`
+                : `✗ Failed: ${result.message}`,
+              isError: !result.success,
+            }];
+          });
+        } catch (err) {
+          setChatMessages(prev => {
+            const without = prev.filter(m => m.id !== thinkingId);
+            return [...without, {
+              id: uid('jules-err'),
+              role: 'assistant',
+              content: err instanceof Error ? err.message : 'Jules dispatch failed',
+              isError: true,
+            }];
+          });
         }
-
-        abortAgentRef.current = abort;
+        setLoadingChat(false);
+        setTimeout(() => chatScrollRef.current?.scrollToEnd({ animated: true }), 100);
         return;
       }
 
-      // Chat mode — simple Q&A or code edits
-      const isEditRequest =
-        /\b(edit|change|modify|update|fix|refactor|rewrite)\b/i.test(currentInput) && activeTab;
+      // Streaming agent (FreeLLM or Claude Code)
+      const thinkingId = uid('thinking');
+      let currentStepNumber = 0;
+      let tokenBuffer = '';
 
-      if (isEditRequest && activeTab) {
-        const result = await copilotEdit(activeTab, currentInput, false);
+      const agentCallbacks = {
+        onSessionId: (sid: string) => {
+          setAgentSessionId(sid);
+        },
+        onThinking: (content: string, step?: number) => {
+          if (step !== undefined && step !== currentStepNumber) {
+            currentStepNumber = step;
+          }
+          const thinkingMsg: ChatMessage = {
+            id: `${thinkingId}-${step || 0}`,
+            role: 'system',
+            content: content || 'Reasoning...',
+            isThinking: true,
+            step: step || currentStepNumber,
+          };
+          setThinkingSteps(prev => {
+            const existing = prev.findIndex(m => m.step === (step || currentStepNumber));
+            if (existing >= 0) {
+              const updated = [...prev];
+              updated[existing] = thinkingMsg;
+              return updated;
+            }
+            return [...prev, thinkingMsg];
+          });
+        },
+        onToolCall: (tool: string, args: Record<string, unknown>, step?: number) => {
+          const toolMsg: ChatMessage = {
+            id: uid(`tool-${step || 0}`),
+            role: 'system',
+            content: `Using ${tool}`,
+            isToolCall: true,
+            toolName: tool,
+            toolArgs: args,
+            step: step || currentStepNumber,
+          };
+          setThinkingSteps(prev => [...prev, toolMsg]);
+        },
+        onToolResult: (tool: string, result: Record<string, unknown>, durationMs?: number, step?: number) => {
+          setThinkingSteps(prev => {
+            const lastToolIdx = prev.findLastIndex(m => m.isToolCall && m.toolName === tool);
+            if (lastToolIdx >= 0) {
+              const updated = [...prev];
+              updated[lastToolIdx] = {
+                ...updated[lastToolIdx],
+                toolResult: result,
+                durationMs,
+                content: `${tool} ${result?.status === 'success' ? '✓' : '✗'}`,
+              };
+              return updated;
+            }
+            return prev;
+          });
+        },
+        onToken: (chunk: string) => {
+          tokenBuffer += chunk;
+        },
+        onDone: (fullText: string) => {
+          const finalText = fullText || tokenBuffer;
+          setChatMessages(prev => [...prev, {
+            id: uid('answer'),
+            role: 'assistant',
+            content: finalText || 'Done.',
+          }]);
+          setLoadingChat(false);
+          setThinkingSteps([]);
 
-        const assistantMsg: ChatMessage = {
-          id: (Date.now() + 1).toString(),
-          role: 'assistant',
-          content: result.success
-            ? 'Here are my suggested changes. You can apply them if they look good.'
-            : result.message,
-          isError: !result.success,
-          diff: result.success ? result.diff : undefined,
-          filePath: activeTab,
-        };
+          // Refresh current directory and active file
+          loadDirectory(currentPath);
+          if (activeTab) {
+            readFile(activeTab, 1000).then(result => {
+              if (!result.error) {
+                setOpenTabs(prev => prev.map(t =>
+                  t.path === activeTab ? { ...t, content: result.content, modified: false } : t
+                ));
+              }
+            }).catch(() => {});
+          }
+          setTimeout(() => chatScrollRef.current?.scrollToEnd({ animated: true }), 100);
+        },
+        onError: (error: string) => {
+          setChatMessages(prev => [...prev, {
+            id: uid('error'),
+            role: 'assistant',
+            content: error,
+            isError: true,
+          }]);
+          setLoadingChat(false);
+          setThinkingSteps([]);
+          setTimeout(() => chatScrollRef.current?.scrollToEnd({ animated: true }), 100);
+        },
+        onPipelineStart: (content: string) => {
+          setThinkingSteps(prev => [...prev, {
+            id: uid('pipeline'),
+            role: 'system',
+            content,
+            isThinking: true,
+          }]);
+        },
+        onPhaseStart: (phase: string, content: string) => {
+          setThinkingSteps(prev => [...prev, {
+            id: uid('phase'),
+            role: 'system',
+            content: `Phase: ${phase}`,
+            isThinking: true,
+          }]);
+        },
+        onPhaseResult: (phase: string, content: string) => {
+          setThinkingSteps(prev => [...prev, {
+            id: uid('phase-result'),
+            role: 'system',
+            content: `${phase}: ${content}`,
+            isThinking: true,
+          }]);
+        },
+      };
 
-        setChatMessages(prev => [...prev, assistantMsg]);
-        if (result.success) setPendingEdit(result);
+      let abort: () => void;
+      if (selectedAgent === 'claude_code') {
+        abort = claudeCodeStream(contextMessage, currentPath, agentCallbacks);
       } else {
-        const fileContent = activeTab ? (await readFile(activeTab)).content : undefined;
-        const fileLanguage = activeTab ? activeTab.split('.').pop() : undefined;
-
-        const aiResponse = await askAI(
-          currentInput,
-          fileContent,
-          activeTab ?? undefined,
-          fileLanguage
-        );
-
-        setChatMessages(prev => [...prev, {
-          id: (Date.now() + 1).toString(),
-          role: 'assistant',
-          content: aiResponse.status === 'success'
-            ? aiResponse.response
-            : aiResponse.error || 'AI is not available.',
-          isError: aiResponse.status !== 'success',
-        }]);
+        abort = ideAgentStream(contextMessage, currentPath, agentCallbacks, { sessionId: agentSessionId });
       }
+      abortAgentRef.current = abort;
+
     } catch (err) {
       setChatMessages(prev => [...prev, {
-        id: (Date.now() + 1).toString(),
+        id: uid('msg'),
         role: 'assistant',
-        content: `Error: ${err instanceof Error ? err.message : 'Failed to get AI response.'}`,
+        content: `Error: ${err instanceof Error ? err.message : 'Failed to get AI response'}`,
         isError: true,
       }]);
-    } finally {
-      if (!agentMode) setLoadingChat(false);
-      chatScrollRef.current?.scrollToEnd({ animated: true });
+      setLoadingChat(false);
+      setThinkingSteps([]);
+      setTimeout(() => chatScrollRef.current?.scrollToEnd({ animated: true }), 100);
     }
-  };
+  }, [chatInput, loadingChat, activeTab, openTabs, selectedAgent, currentPath, agentSessionId, loadDirectory]);
 
-  // Apply Copilot edit
-  const applyEdit = () => {
-    if (!pendingEdit || !activeTab) return;
-
-    setOpenTabs(prev => prev.map(t =>
-      t.path === activeTab ? { ...t, content: pendingEdit.suggested_content, modified: true } : t
-    ));
-
+  // Stop agent
+  const stopAgent = useCallback(() => {
+    if (abortAgentRef.current) {
+      abortAgentRef.current();
+      abortAgentRef.current = null;
+    }
+    setLoadingChat(false);
+    setThinkingSteps([]);
     setChatMessages(prev => [...prev, {
-      id: Date.now().toString(),
-      role: 'assistant',
-      content: 'Changes applied! Review and save when ready.',
+      id: uid('stopped'),
+      role: 'system',
+      content: 'Agent stopped by user.',
     }]);
-
-    setPendingEdit(null);
-  };
-
-  // Helper function to get path separator
-  const getPathSeparator = (path: string) => {
-    return path.includes('\\') ? '\\' : '/';
-  };
-
-  // Go to parent
-  const goUp = () => {
-    const separator = getPathSeparator(currentPath);
-    const parent = currentPath.substring(0, currentPath.lastIndexOf(separator));
-    if (parent && parent !== currentPath) {
-      loadDirectory(parent);
-    }
-  };
+  }, []);
 
   // Get file icon
   const getIcon = (file: FileInfo): keyof typeof Ionicons.glyphMap => {
     if (file.is_dir) return 'folder';
-    const ext = file.extension.toLowerCase();
+    const ext = file.extension?.toLowerCase() || '';
     const icons: Record<string, keyof typeof Ionicons.glyphMap> = {
       '.py': 'logo-python',
       '.js': 'logo-javascript',
@@ -611,26 +610,26 @@ export default function IDEScreen() {
       '.md': 'document-text',
       '.html': 'logo-html5',
       '.css': 'logo-css3',
+      '.go': 'code-working',
+      '.java': 'code-working',
+      '.cpp': 'code-working',
+      '.c': 'code-working',
+      '.rs': 'code-working',
     };
     return icons[ext] || 'document';
   };
 
-  const activeFile = openTabs.find(t => t.path === activeTab);
-
-  // Responsive sidebar width
-  const getSidebarStyle = () => {
-    if (isMobile) {
-      return sidebarCollapsed ? { width: 0, display: 'none' as const } : {
-        position: 'absolute' as const,
-        left: 48,
-        top: 0,
-        bottom: 0,
-        width: windowWidth * 0.7,
-        zIndex: 100,
-      };
+  // Get agent label
+  const getAgentLabel = () => {
+    switch (selectedAgent) {
+      case 'freellm': return 'FreeLLM';
+      case 'claude_code': return 'Claude Code';
+      case 'jules': return 'Jules';
     }
-    return { width: sidebarCollapsed ? 0 : 180 };
   };
+
+  const activeFile = openTabs.find(t => t.path === activeTab);
+  const folderName = currentPath.split(/[/\\]/).filter(Boolean).pop() || 'Root';
 
   return (
     <KeyboardAvoidingView
@@ -638,129 +637,164 @@ export default function IDEScreen() {
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
       {/* Activity Bar */}
-      <View style={[styles.activityBar, isMobile && styles.activityBarMobile]}>
-        {/* Sidebar Toggle */}
+      <View style={styles.activityBar}>
         <TouchableOpacity
-          style={styles.activityIcon}
-          onPress={toggleSidebar}
+          style={[styles.activityIcon, activePanel === 'files' && styles.activityIconActive]}
+          onPress={() => {
+            if (activePanel === 'files' && showExplorer) {
+              toggleExplorer();
+              setActivePanel(null);
+            } else {
+              setActivePanel('files');
+              if (!showExplorer) toggleExplorer();
+              if (isMobile) {
+                setShowTerminalPanel(false);
+                setShowAgentPanel(false);
+              }
+            }
+          }}
         >
-          <Ionicons
-            name={sidebarCollapsed ? "menu" : "close"}
-            size={24}
-            color={VSColors.white}
-          />
+          <Ionicons name="documents-outline" size={22} color={activePanel === 'files' ? Colors.primary : Colors.muted} />
         </TouchableOpacity>
 
         <TouchableOpacity
-          style={[styles.activityIcon, activePanel === 'files' && styles.activityIconActive]}
-          onPress={() => { setActivePanel('files'); if (sidebarCollapsed) toggleSidebar(); }}
+          style={[styles.activityIcon, activePanel === 'terminal' && styles.activityIconActive]}
+          onPress={() => {
+            if (activePanel === 'terminal' && showTerminalPanel) {
+              toggleTerminal();
+              setActivePanel(null);
+            } else {
+              setActivePanel('terminal');
+              if (!showTerminalPanel) toggleTerminal();
+              if (isMobile) {
+                setShowExplorer(false);
+                setShowAgentPanel(false);
+              }
+            }
+          }}
         >
-          <Ionicons name="documents" size={24} color={activePanel === 'files' ? VSColors.white : VSColors.textMuted} />
+          <Ionicons name="terminal-outline" size={22} color={activePanel === 'terminal' ? Colors.primary : Colors.muted} />
         </TouchableOpacity>
+
         <TouchableOpacity
-          style={[styles.activityIcon, activePanel === 'search' && styles.activityIconActive]}
-          onPress={() => { setActivePanel('search'); if (sidebarCollapsed) toggleSidebar(); }}
+          style={[styles.activityIcon, activePanel === 'agent' && styles.activityIconActive]}
+          onPress={() => {
+            if (activePanel === 'agent' && showAgentPanel) {
+              toggleAgent();
+              setActivePanel(null);
+            } else {
+              setActivePanel('agent');
+              if (!showAgentPanel) toggleAgent();
+              if (isMobile) {
+                setShowExplorer(false);
+                setShowTerminalPanel(false);
+              }
+            }
+          }}
         >
-          <Ionicons name="search" size={24} color={activePanel === 'search' ? VSColors.white : VSColors.textMuted} />
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.activityIcon, activePanel === 'git' && styles.activityIconActive]}
-          onPress={() => { setActivePanel('git'); if (sidebarCollapsed) toggleSidebar(); }}
-        >
-          <Ionicons name="git-branch" size={24} color={activePanel === 'git' ? VSColors.white : VSColors.textMuted} />
+          <Ionicons name="sparkles-outline" size={22} color={activePanel === 'agent' ? Colors.primary : Colors.muted} />
         </TouchableOpacity>
 
         <View style={{ flex: 1 }} />
 
-        {/* Bottom Actions */}
-        <TouchableOpacity
-          style={[styles.activityIcon, activeBottomPanel === 'terminal' && styles.activityIconActive]}
-          onPress={() => toggleBottomPanel('terminal')}
-        >
-          <Ionicons name="terminal" size={24} color={activeBottomPanel === 'terminal' || showTerminal ? VSColors.accent : VSColors.textMuted} />
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.activityIcon, activeBottomPanel === 'copilot' && styles.activityIconActive]}
-          onPress={() => toggleBottomPanel('copilot')}
-        >
-          <Ionicons name="sparkles" size={24} color={activeBottomPanel === 'copilot' || showCopilotPanel ? VSColors.accent : VSColors.textMuted} />
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.activityIcon} onPress={() => setShowOpenFolder(true)}>
-          <Ionicons name="folder-open" size={24} color={VSColors.textMuted} />
+        <TouchableOpacity style={styles.activityIcon} onPress={() => setShowOpenFolderModal(true)}>
+          <Ionicons name="folder-open-outline" size={22} color={Colors.muted} />
         </TouchableOpacity>
       </View>
 
-      {/* Sidebar Overlay for Mobile */}
-      {isMobile && !sidebarCollapsed && (
+      {/* Explorer Panel */}
+      {showExplorer && (
+        <Animated.View style={[
+          styles.explorerPanel,
+          isMobile && styles.explorerPanelMobile,
+          { width: isMobile ? explorerWidth : 240 },
+        ]}>
+          <View style={styles.panelHeader}>
+            <Text style={styles.panelTitle}>EXPLORER</Text>
+            <View style={{ flexDirection: 'row', gap: Spacing.sm }}>
+              <TouchableOpacity onPress={() => loadDirectory(currentPath)}>
+                <Ionicons name="refresh" size={16} color={Colors.muted} />
+              </TouchableOpacity>
+              {isMobile && (
+                <TouchableOpacity onPress={toggleExplorer}>
+                  <Ionicons name="close" size={16} color={Colors.muted} />
+                </TouchableOpacity>
+              )}
+            </View>
+          </View>
+
+          <TouchableOpacity style={styles.breadcrumb} onPress={goUp}>
+            <Ionicons name="chevron-up" size={14} color={Colors.muted} />
+            <Text style={styles.breadcrumbText} numberOfLines={1}>{folderName}</Text>
+          </TouchableOpacity>
+
+          {loadingFiles ? (
+            <View style={styles.centerLoader}>
+              <ActivityIndicator size="small" color={Colors.primary} />
+            </View>
+          ) : (
+            <FlatList
+              data={files}
+              keyExtractor={item => item.path}
+              renderItem={({ item }) => (
+                <TouchableOpacity
+                  style={[styles.fileItem, activeTab === item.path && styles.fileItemActive]}
+                  onPress={() => openFile(item)}
+                >
+                  <Ionicons
+                    name={getIcon(item)}
+                    size={16}
+                    color={item.is_dir ? Colors.yellow : Colors.primary}
+                    style={{ marginRight: Spacing.sm }}
+                  />
+                  <Text style={styles.fileItemText} numberOfLines={1}>{item.name}</Text>
+                </TouchableOpacity>
+              )}
+            />
+          )}
+        </Animated.View>
+      )}
+
+      {/* Mobile overlay */}
+      {isMobile && (showExplorer || showTerminalPanel || showAgentPanel) && (
         <TouchableOpacity
-          style={styles.sidebarOverlay}
-          onPress={toggleSidebar}
+          style={styles.overlay}
           activeOpacity={1}
+          onPress={() => {
+            if (showExplorer) toggleExplorer();
+            if (showTerminalPanel) toggleTerminal();
+            if (showAgentPanel) toggleAgent();
+            setActivePanel(null);
+          }}
         />
       )}
 
-      {/* Sidebar */}
-      <Animated.View style={[styles.sidebar, getSidebarStyle()]}>
-        <View style={styles.sidebarHeader}>
-          <Text style={styles.sidebarTitle}>EXPLORER</Text>
-          <TouchableOpacity onPress={() => loadDirectory(currentPath)}>
-            <Ionicons name="refresh" size={16} color={VSColors.textMuted} />
-          </TouchableOpacity>
-        </View>
-
-        <TouchableOpacity style={styles.folderHeader} onPress={goUp}>
-          <Ionicons name="chevron-up" size={14} color={VSColors.textMuted} />
-          <Text style={styles.folderName} numberOfLines={1}>
-            {currentPath.split(/[/\\]/).pop() || 'Root'}
-          </Text>
-        </TouchableOpacity>
-
-        {loadingFiles ? (
-          <ActivityIndicator size="small" color={VSColors.accent} style={{ marginTop: 20 }} />
-        ) : (
-          <FlatList
-            data={files}
-            keyExtractor={item => item.path}
-            renderItem={({ item }) => (
-              <TouchableOpacity
-                style={[styles.fileRow, activeTab === item.path && styles.fileRowActive]}
-                onPress={() => { openFile(item); if (isMobile) setSidebarCollapsed(true); }}
-              >
-                <Ionicons
-                  name={getIcon(item)}
-                  size={16}
-                  color={item.is_dir ? VSColors.warning : VSColors.textMuted}
-                />
-                <Text style={styles.fileName} numberOfLines={1}>{item.name}</Text>
-              </TouchableOpacity>
-            )}
-          />
-        )}
-      </Animated.View>
-
-      {/* Main Area */}
-      <View style={styles.main}>
-        {/* Tabs */}
+      {/* Main Editor Area */}
+      <View style={styles.mainArea}>
+        {/* Tab Bar */}
         <View style={styles.tabBar}>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ flex: 1 }}>
             {openTabs.map(tab => (
-              <TouchableOpacity
-                key={tab.path}
-                style={[styles.tab, activeTab === tab.path && styles.tabActive]}
-                onPress={() => setActiveTab(tab.path)}
-              >
-                <Text style={[styles.tabText, activeTab === tab.path && styles.tabTextActive]} numberOfLines={1}>
-                  {tab.modified ? '● ' : ''}{tab.name}
-                </Text>
-                <TouchableOpacity onPress={() => closeTab(tab.path)} style={styles.tabClose}>
-                  <Ionicons name="close" size={14} color={VSColors.textMuted} />
+              <View key={tab.path} style={[styles.tab, activeTab === tab.path && styles.tabActive]}>
+                <TouchableOpacity
+                  style={styles.tabButton}
+                  onPress={() => setActiveTab(tab.path)}
+                >
+                  <Text style={[styles.tabText, activeTab === tab.path && styles.tabTextActive]} numberOfLines={1}>
+                    {tab.modified && <Text style={styles.modifiedDot}>● </Text>}
+                    {tab.name}
+                  </Text>
                 </TouchableOpacity>
-              </TouchableOpacity>
+                <TouchableOpacity style={styles.tabClose} onPress={() => closeTab(tab.path)}>
+                  <Ionicons name="close" size={14} color={Colors.muted} />
+                </TouchableOpacity>
+              </View>
             ))}
           </ScrollView>
           {activeTab && (
-            <TouchableOpacity style={styles.saveBtn} onPress={() => saveFile(activeTab)}>
-              <Ionicons name="save" size={18} color={VSColors.accent} />
+            <TouchableOpacity style={styles.saveButton} onPress={() => saveFile(activeTab)}>
+              <Ionicons name="save-outline" size={18} color={Colors.primary} />
+              <Text style={styles.saveButtonText}>Save</Text>
             </TouchableOpacity>
           )}
         </View>
@@ -769,135 +803,167 @@ export default function IDEScreen() {
         <View style={styles.editorContainer}>
           {activeFile ? (
             <ScrollView style={styles.editor}>
-              <TextInput
-                style={styles.codeInput}
-                value={activeFile.content}
-                onChangeText={(text) => updateContent(activeFile.path, text)}
-                multiline
-                autoCapitalize="none"
-                autoCorrect={false}
-                spellCheck={false}
-              />
+              <View style={styles.codeWrapper}>
+                <View style={styles.lineNumbers}>
+                  {activeFile.content.split('\n').map((_, idx) => (
+                    <Text key={idx} style={styles.lineNumber}>{idx + 1}</Text>
+                  ))}
+                </View>
+                <TextInput
+                  style={styles.codeInput}
+                  value={activeFile.content}
+                  onChangeText={(text) => updateContent(activeFile.path, text)}
+                  multiline
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  spellCheck={false}
+                  scrollEnabled={false}
+                />
+              </View>
             </ScrollView>
           ) : (
-            <View style={styles.noFile}>
-              <Ionicons name="code-slash" size={48} color={VSColors.textMuted} />
-              <Text style={styles.noFileText}>Open a file to start editing</Text>
-              <TouchableOpacity style={styles.openFolderBtn} onPress={() => setShowOpenFolder(true)}>
-                <Text style={styles.openFolderBtnText}>Open Folder</Text>
+            <View style={styles.emptyEditor}>
+              <Ionicons name="code-slash-outline" size={64} color={Colors.mutedDark} />
+              <Text style={styles.emptyText}>Open a file to start editing</Text>
+              <TouchableOpacity style={styles.primaryButton} onPress={() => setShowOpenFolderModal(true)}>
+                <Text style={styles.primaryButtonText}>Open Folder</Text>
               </TouchableOpacity>
             </View>
           )}
         </View>
-
-        {/* Terminal - Desktop or when active on mobile */}
-        {(showTerminal || (isMobile && activeBottomPanel === 'terminal')) && (
-          <View style={[styles.terminal, isMobile && styles.terminalMobile]}>
-            <View style={styles.terminalHeader}>
-              <Text style={styles.terminalTitle}>TERMINAL</Text>
-              {isMobile && (
-                <TouchableOpacity onPress={() => setActiveBottomPanel(null)} style={styles.panelCloseBtn}>
-                  <Ionicons name="chevron-down" size={18} color={VSColors.textMuted} />
-                </TouchableOpacity>
-              )}
-            </View>
-            <ScrollView
-              ref={terminalScrollRef}
-              style={styles.terminalOutput}
-              onContentSizeChange={() => terminalScrollRef.current?.scrollToEnd({ animated: true })}
-            >
-              <Text style={styles.terminalText}>{terminalOutput}</Text>
-            </ScrollView>
-            <View style={styles.terminalInputRow}>
-              <Text style={styles.terminalPrompt}>$</Text>
-              <TextInput
-                style={styles.terminalInput}
-                value={terminalCommand}
-                onChangeText={setTerminalCommand}
-                onSubmitEditing={runCommand}
-                placeholder="Enter command..."
-                placeholderTextColor={VSColors.textMuted}
-                editable={!runningCommand}
-              />
-              <TouchableOpacity onPress={runCommand} disabled={runningCommand} style={styles.terminalSendBtn}>
-                {runningCommand ? (
-                  <ActivityIndicator size="small" color={VSColors.accent} />
-                ) : (
-                  <Ionicons name="send" size={18} color={VSColors.accent} />
-                )}
-              </TouchableOpacity>
-            </View>
-          </View>
-        )}
       </View>
 
-      {/* Copilot Panel - Desktop sidebar or Mobile bottom sheet */}
-      {(showCopilotPanel || (isMobile && activeBottomPanel === 'copilot')) && (
-        <View style={[
-          styles.copilotPanel,
-          isMobile && styles.copilotPanelMobile,
-          isTablet && styles.copilotPanelTablet,
+      {/* Terminal Panel */}
+      {showTerminalPanel && (
+        <Animated.View style={[
+          styles.terminalPanel,
+          isMobile && styles.terminalPanelMobile,
+          { height: isMobile ? terminalPanelHeight : 280 },
         ]}>
-          <View style={styles.copilotHeader}>
-            <Ionicons name="sparkles" size={16} color={VSColors.accent} />
-            <Text style={styles.copilotTitle}>{agentMode ? 'AGENT' : 'CHAT'}</Text>
-            {/* Agent Selector Dropdown */}
-            {agentMode && (
-              <TouchableOpacity
-                style={styles.agentSelector}
-                onPress={() => setShowAgentPicker(!showAgentPicker)}
-              >
-                <Text style={styles.agentSelectorText}>
-                  {selectedAgent === 'freellm' ? 'FreeLLM' : selectedAgent === 'claude_code' ? 'Claude Code' : 'Jules'}
-                </Text>
-                <Ionicons name={showAgentPicker ? 'chevron-up' : 'chevron-down'} size={12} color={VSColors.accent} />
-              </TouchableOpacity>
-            )}
-            <TouchableOpacity
-              style={[styles.agentToggle, agentMode && styles.agentToggleOn]}
-              onPress={() => setAgentMode((v) => !v)}
-            >
-              <Text style={styles.agentToggleText}>{agentMode ? 'Agent' : 'Chat'}</Text>
-            </TouchableOpacity>
+          <View style={styles.panelHeader}>
+            <Ionicons name="terminal" size={14} color={Colors.green} style={{ marginRight: Spacing.xs }} />
+            <Text style={styles.panelTitle}>TERMINAL</Text>
             <View style={{ flex: 1 }} />
+            <TouchableOpacity onPress={() => setTerminalLines([{ id: '0', type: 'output', content: 'Terminal cleared' }])}>
+              <Ionicons name="trash-outline" size={14} color={Colors.muted} />
+            </TouchableOpacity>
             {isMobile && (
-              <TouchableOpacity onPress={() => setActiveBottomPanel(null)} style={styles.panelCloseBtn}>
-                <Ionicons name="chevron-down" size={18} color={VSColors.textMuted} />
+              <TouchableOpacity onPress={toggleTerminal} style={{ marginLeft: Spacing.sm }}>
+                <Ionicons name="close" size={16} color={Colors.muted} />
               </TouchableOpacity>
             )}
           </View>
-          {/* Agent Picker Dropdown */}
-          {showAgentPicker && agentMode && (
-            <View style={styles.agentPickerDropdown}>
+
+          <ScrollView
+            ref={terminalScrollRef}
+            style={styles.terminalOutput}
+            onContentSizeChange={() => terminalScrollRef.current?.scrollToEnd({ animated: true })}
+          >
+            {terminalLines.map(line => (
+              <View key={line.id} style={styles.terminalLine}>
+                {line.type === 'command' && <Text style={styles.terminalPrompt}>$ </Text>}
+                <Text style={[
+                  styles.terminalText,
+                  line.type === 'command' && styles.terminalTextCommand,
+                  line.type === 'error' && styles.terminalTextError,
+                ]}>{line.content}</Text>
+              </View>
+            ))}
+          </ScrollView>
+
+          <View style={styles.terminalInput}>
+            <Text style={styles.terminalPrompt}>$</Text>
+            <TextInput
+              style={styles.terminalTextInput}
+              value={terminalCommand}
+              onChangeText={setTerminalCommand}
+              onSubmitEditing={runCommand}
+              placeholder="Enter command..."
+              placeholderTextColor={Colors.mutedDark}
+              editable={!runningCommand}
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+            <TouchableOpacity onPress={runCommand} disabled={runningCommand} style={styles.terminalSendBtn}>
+              {runningCommand ? (
+                <ActivityIndicator size="small" color={Colors.primary} />
+              ) : (
+                <Ionicons name="send" size={16} color={Colors.primary} />
+              )}
+            </TouchableOpacity>
+          </View>
+        </Animated.View>
+      )}
+
+      {/* Agent Panel */}
+      {showAgentPanel && (
+        <Animated.View style={[
+          styles.agentPanel,
+          isMobile && styles.agentPanelMobile,
+          { height: isMobile ? agentPanelHeight : 400 },
+        ]}>
+          <View style={styles.panelHeader}>
+            <Ionicons name="sparkles" size={14} color={Colors.primary} style={{ marginRight: Spacing.xs }} />
+            <Text style={styles.panelTitle}>AI AGENT</Text>
+
+            <TouchableOpacity
+              style={styles.agentSelector}
+              onPress={() => setShowAgentPicker(!showAgentPicker)}
+            >
+              <Text style={styles.agentSelectorText}>{getAgentLabel()}</Text>
+              <Ionicons name={showAgentPicker ? 'chevron-up' : 'chevron-down'} size={10} color={Colors.primary} />
+            </TouchableOpacity>
+
+            {loadingChat && (
+              <TouchableOpacity style={styles.stopButton} onPress={stopAgent}>
+                <Ionicons name="stop-circle" size={16} color={Colors.red} />
+              </TouchableOpacity>
+            )}
+
+            <View style={{ flex: 1 }} />
+            {isMobile && (
+              <TouchableOpacity onPress={toggleAgent}>
+                <Ionicons name="close" size={16} color={Colors.muted} />
+              </TouchableOpacity>
+            )}
+          </View>
+
+          {showAgentPicker && (
+            <View style={styles.agentPickerMenu}>
               <TouchableOpacity
                 style={[styles.agentPickerItem, selectedAgent === 'freellm' && styles.agentPickerItemActive]}
                 onPress={() => { setSelectedAgent('freellm'); setShowAgentPicker(false); }}
               >
-                <Ionicons name="infinite-outline" size={16} color={selectedAgent === 'freellm' ? VSColors.accent : VSColors.text} />
-                <View style={styles.agentPickerInfo}>
+                <Ionicons name="infinite" size={18} color={selectedAgent === 'freellm' ? Colors.primary : Colors.foreground} />
+                <View style={{ flex: 1, marginLeft: Spacing.md }}>
                   <Text style={[styles.agentPickerName, selectedAgent === 'freellm' && styles.agentPickerNameActive]}>FreeLLM</Text>
                   <Text style={styles.agentPickerDesc}>Free AI agent with full workspace access</Text>
                 </View>
+                {selectedAgent === 'freellm' && <Ionicons name="checkmark-circle" size={18} color={Colors.primary} />}
               </TouchableOpacity>
+
               <TouchableOpacity
                 style={[styles.agentPickerItem, selectedAgent === 'claude_code' && styles.agentPickerItemActive]}
                 onPress={() => { setSelectedAgent('claude_code'); setShowAgentPicker(false); }}
               >
-                <Ionicons name="terminal-outline" size={16} color={selectedAgent === 'claude_code' ? VSColors.accent : VSColors.text} />
-                <View style={styles.agentPickerInfo}>
+                <Ionicons name="terminal" size={18} color={selectedAgent === 'claude_code' ? Colors.primary : Colors.foreground} />
+                <View style={{ flex: 1, marginLeft: Spacing.md }}>
                   <Text style={[styles.agentPickerName, selectedAgent === 'claude_code' && styles.agentPickerNameActive]}>Claude Code</Text>
                   <Text style={styles.agentPickerDesc}>Anthropic's CLI agent on your laptop</Text>
                 </View>
+                {selectedAgent === 'claude_code' && <Ionicons name="checkmark-circle" size={18} color={Colors.primary} />}
               </TouchableOpacity>
+
               <TouchableOpacity
                 style={[styles.agentPickerItem, selectedAgent === 'jules' && styles.agentPickerItemActive]}
                 onPress={() => { setSelectedAgent('jules'); setShowAgentPicker(false); }}
               >
-                <Ionicons name="git-branch-outline" size={16} color={selectedAgent === 'jules' ? VSColors.accent : VSColors.text} />
-                <View style={styles.agentPickerInfo}>
+                <Ionicons name="git-branch" size={18} color={selectedAgent === 'jules' ? Colors.primary : Colors.foreground} />
+                <View style={{ flex: 1, marginLeft: Spacing.md }}>
                   <Text style={[styles.agentPickerName, selectedAgent === 'jules' && styles.agentPickerNameActive]}>Jules</Text>
                   <Text style={styles.agentPickerDesc}>GitHub's async coding agent via issues</Text>
                 </View>
+                {selectedAgent === 'jules' && <Ionicons name="checkmark-circle" size={18} color={Colors.primary} />}
               </TouchableOpacity>
             </View>
           )}
@@ -906,126 +972,102 @@ export default function IDEScreen() {
             ref={chatScrollRef}
             style={styles.chatMessages}
             onContentSizeChange={() => chatScrollRef.current?.scrollToEnd({ animated: true })}
-            keyboardShouldPersistTaps="handled"
           >
-            {chatMessages.map(msg => {
-              if (msg.isThinking) {
-                return (
-                  <View key={msg.id} style={styles.thinkingBubble}>
-                    <ActivityIndicator size="small" color={VSColors.accent} />
-                    <Text style={styles.thinkingText}>{msg.content}</Text>
+            {chatMessages.map(msg => (
+              <View key={msg.id} style={[
+                styles.chatMessage,
+                msg.role === 'user' && styles.chatMessageUser,
+                msg.role === 'assistant' && styles.chatMessageAssistant,
+                msg.role === 'system' && styles.chatMessageSystem,
+              ]}>
+                <Text style={[styles.chatMessageText, msg.isError && styles.chatMessageError]}>
+                  {msg.content}
+                </Text>
+              </View>
+            ))}
+
+            {/* Thinking steps */}
+            {thinkingSteps.length > 0 && (
+              <View style={styles.thinkingContainer}>
+                <TouchableOpacity
+                  style={styles.thinkingHeader}
+                  onPress={() => setShowThinkingDetails(!showThinkingDetails)}
+                >
+                  <View style={styles.thinkingPulse}>
+                    <ActivityIndicator size="small" color={Colors.primary} />
                   </View>
-                );
-              }
-              if (msg.isToolCall) {
-                return (
-                  <View key={msg.id} style={styles.toolCallBubble}>
-                    <View style={styles.toolCallHeader}>
-                      <Ionicons name="build" size={12} color={VSColors.accent} />
-                      <Text style={styles.toolCallName}>{msg.toolName}</Text>
-                      {msg.toolResult && (
-                        <Text style={[styles.toolCallStatus, msg.toolResult.status === 'success' ? styles.toolCallSuccess : styles.toolCallFail]}>
-                          {msg.toolResult.status === 'success' ? '✓' : '✗'}
-                        </Text>
-                      )}
-                      {msg.durationMs ? (
-                        <Text style={styles.toolCallDuration}>{msg.durationMs}ms</Text>
-                      ) : null}
-                    </View>
-                    {msg.toolArgs && Object.keys(msg.toolArgs).length > 0 && (
-                      <Text style={styles.toolCallArgs} numberOfLines={2}>
-                        {Object.entries(msg.toolArgs).map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`).join(', ')}
-                      </Text>
-                    )}
-                    {msg.toolResult && 'output' in msg.toolResult && msg.toolResult.output ? (
-                      <Text style={styles.toolCallOutput} numberOfLines={3}>
-                        {String(msg.toolResult.output as string).substring(0, 200)}
-                      </Text>
-                    ) : null}
-                  </View>
-                );
-              }
-              return (
-                <View key={msg.id} style={[styles.chatBubble, msg.role === 'user' ? styles.userBubble : styles.aiBubble]}>
-                  <Text style={[styles.chatText, msg.isError && styles.chatError]}>{msg.content}</Text>
-                  {msg.diff && (
-                    <View style={styles.diffBox}>
-                      <Text style={styles.diffText}>{msg.diff.substring(0, 500)}</Text>
-                      {pendingEdit && (
-                        <TouchableOpacity style={styles.applyBtn} onPress={applyEdit}>
-                          <Text style={styles.applyBtnText}>Apply Changes</Text>
-                        </TouchableOpacity>
-                      )}
-                    </View>
-                  )}
-                </View>
-              );
-            })}
-            {loadingChat && !chatMessages.some(m => m.isThinking) && (
-              <ActivityIndicator size="small" color={VSColors.accent} style={{ marginTop: 8 }} />
+                  <Text style={styles.thinkingHeaderText}>{loadingChat ? 'Processing...' : `${thinkingSteps.length} steps`}</Text>
+                  <Ionicons name={showThinkingDetails ? 'chevron-up' : 'chevron-down'} size={16} color={Colors.primary} />
+                </TouchableOpacity>
+
+                {showThinkingDetails && thinkingSteps.map(step => {
+                  if (step.isThinking) {
+                    return (
+                      <View key={step.id} style={styles.thinkingStep}>
+                        <Ionicons name="bulb-outline" size={12} color={Colors.yellow} />
+                        <Text style={styles.thinkingStepText}>{step.content}</Text>
+                      </View>
+                    );
+                  }
+                  if (step.isToolCall) {
+                    return (
+                      <View key={step.id} style={styles.toolCallCard}>
+                        <View style={styles.toolCallHeader}>
+                          <Ionicons name="construct-outline" size={14} color={Colors.cyan} />
+                          <Text style={styles.toolCallName}>{step.toolName}</Text>
+                          {step.toolResult && (
+                            <View style={styles.toolCallStatus}>
+                              <Ionicons
+                                name={step.toolResult.status === 'success' ? 'checkmark-circle' : 'close-circle'}
+                                size={12}
+                                color={step.toolResult.status === 'success' ? Colors.green : Colors.red}
+                              />
+                              {step.durationMs && (
+                                <Text style={styles.toolCallDuration}>{step.durationMs}ms</Text>
+                              )}
+                            </View>
+                          )}
+                        </View>
+                        {step.toolArgs && Object.keys(step.toolArgs).length > 0 && (
+                          <Text style={styles.toolCallArgs} numberOfLines={2}>
+                            {Object.entries(step.toolArgs)
+                              .map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`)
+                              .join(', ')}
+                          </Text>
+                        )}
+                      </View>
+                    );
+                  }
+                  return null;
+                })}
+              </View>
             )}
           </ScrollView>
 
-          {/* Copilot Input - Always visible with send button */}
-          <View style={[styles.chatInputRow, isMobile && styles.chatInputRowMobile]}>
+          <View style={styles.chatInputContainer}>
             <TextInput
-              style={[styles.chatInput, isMobile && styles.chatInputMobile]}
+              style={styles.chatInput}
               value={chatInput}
               onChangeText={setChatInput}
-              placeholder={
-                agentMode
-                  ? 'Ask anything — I can read/write files, run commands…'
-                  : activeTab
-                    ? 'Ask or request code edits…'
-                    : 'Ask AI (open a file to edit code)…'
-              }
-              placeholderTextColor={VSColors.textMuted}
+              placeholder="Ask me anything about this codebase..."
+              placeholderTextColor={Colors.mutedDark}
               multiline
               maxLength={2000}
-              onSubmitEditing={sendCopilotMessage}
-              blurOnSubmit={false}
+              editable={!loadingChat}
             />
             <TouchableOpacity
-              style={[styles.sendBtn, (!chatInput.trim() || loadingChat) && styles.sendBtnDisabled]}
+              style={[styles.chatSendButton, (!chatInput.trim() || loadingChat) && styles.chatSendButtonDisabled]}
               onPress={sendCopilotMessage}
-              disabled={loadingChat || !chatInput.trim()}
+              disabled={!chatInput.trim() || loadingChat}
             >
-              <Ionicons name="send" size={20} color={loadingChat || !chatInput.trim() ? VSColors.textMuted : VSColors.white} />
+              <Ionicons name="send" size={18} color={Colors.foreground} />
             </TouchableOpacity>
           </View>
-        </View>
-      )}
-
-      {/* Mobile Bottom Navigation Bar */}
-      {isMobile && !activeBottomPanel && (
-        <View style={styles.mobileBottomBar}>
-          <TouchableOpacity
-            style={styles.mobileBottomBtn}
-            onPress={() => setActiveBottomPanel('terminal')}
-          >
-            <Ionicons name="terminal" size={22} color={VSColors.textMuted} />
-            <Text style={styles.mobileBottomBtnText}>Terminal</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.mobileBottomBtn}
-            onPress={() => setActiveBottomPanel('copilot')}
-          >
-            <Ionicons name="sparkles" size={22} color={VSColors.accent} />
-            <Text style={[styles.mobileBottomBtnText, { color: VSColors.accent }]}>Copilot</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.mobileBottomBtn}
-            onPress={() => activeTab && saveFile(activeTab)}
-            disabled={!activeTab}
-          >
-            <Ionicons name="save" size={22} color={activeTab ? VSColors.success : VSColors.textMuted} />
-            <Text style={styles.mobileBottomBtnText}>Save</Text>
-          </TouchableOpacity>
-        </View>
+        </Animated.View>
       )}
 
       {/* Open Folder Modal */}
-      <Modal visible={showOpenFolder} transparent animationType="fade">
+      <Modal visible={showOpenFolderModal} transparent animationType="fade">
         <View style={styles.modalOverlay}>
           <View style={styles.modal}>
             <Text style={styles.modalTitle}>Open Folder</Text>
@@ -1033,22 +1075,25 @@ export default function IDEScreen() {
               style={styles.modalInput}
               value={folderInput}
               onChangeText={setFolderInput}
-              placeholder="C:\path\to\folder"
-              placeholderTextColor={VSColors.textMuted}
+              placeholder="Enter folder path..."
+              placeholderTextColor={Colors.mutedDark}
               autoCapitalize="none"
             />
-            <View style={styles.modalBtns}>
-              <TouchableOpacity style={styles.modalBtnCancel} onPress={() => setShowOpenFolder(false)}>
-                <Text style={styles.modalBtnText}>Cancel</Text>
+            <View style={styles.modalButtons}>
+              <TouchableOpacity
+                style={[styles.modalButton, styles.modalButtonSecondary]}
+                onPress={() => setShowOpenFolderModal(false)}
+              >
+                <Text style={styles.modalButtonTextSecondary}>Cancel</Text>
               </TouchableOpacity>
               <TouchableOpacity
-                style={styles.modalBtnOpen}
+                style={[styles.modalButton, styles.modalButtonPrimary]}
                 onPress={() => {
                   loadDirectory(folderInput);
-                  setShowOpenFolder(false);
+                  setShowOpenFolderModal(false);
                 }}
               >
-                <Text style={[styles.modalBtnText, { color: VSColors.white }]}>Open</Text>
+                <Text style={styles.modalButtonText}>Open</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -1062,566 +1107,575 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     flexDirection: 'row',
-    backgroundColor: VSColors.bg,
+    backgroundColor: Colors.background,
   },
+
+  // Activity Bar
   activityBar: {
-    width: 48,
-    backgroundColor: VSColors.activityBar,
-    paddingTop: 8,
+    width: ACTIVITY_BAR_WIDTH,
+    backgroundColor: Colors.surface,
+    borderRightWidth: 1,
+    borderRightColor: Colors.border,
+    paddingVertical: Spacing.md,
     alignItems: 'center',
-  },
-  activityBarMobile: {
-    paddingBottom: 8,
   },
   activityIcon: {
-    width: 48,
-    height: 48,
+    width: ACTIVITY_BAR_WIDTH,
+    height: ACTIVITY_BAR_WIDTH,
     justifyContent: 'center',
     alignItems: 'center',
+    marginBottom: Spacing.xs,
     borderLeftWidth: 2,
     borderLeftColor: 'transparent',
   },
   activityIconActive: {
-    borderLeftColor: VSColors.accent,
+    borderLeftColor: Colors.primary,
+    backgroundColor: Colors.primaryBg,
   },
-  sidebarOverlay: {
-    position: 'absolute',
-    left: 48,
-    top: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    zIndex: 99,
-  },
-  sidebar: {
-    width: 180,
-    backgroundColor: VSColors.sidebar,
+
+  // Explorer Panel
+  explorerPanel: {
+    backgroundColor: Colors.surface,
     borderRightWidth: 1,
-    borderRightColor: VSColors.border,
-    overflow: 'hidden',
+    borderRightColor: Colors.border,
   },
-  sidebarHeader: {
+  explorerPanelMobile: {
+    position: 'absolute',
+    left: ACTIVITY_BAR_WIDTH,
+    top: 0,
+    bottom: 0,
+    zIndex: 100,
+    shadowColor: '#000',
+    shadowOffset: { width: 2, height: 0 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 5,
+  },
+  panelHeader: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.md,
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.border,
   },
-  sidebarTitle: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: VSColors.textMuted,
+  panelTitle: {
+    fontSize: FontSize.xs,
+    fontWeight: '700',
+    color: Colors.muted,
     letterSpacing: 0.5,
   },
-  folderHeader: {
+  breadcrumb: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 8,
-    paddingVertical: 6,
-    backgroundColor: VSColors.hover,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
+    backgroundColor: Colors.card,
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.border,
   },
-  folderName: {
-    fontSize: 13,
+  breadcrumbText: {
+    fontSize: FontSize.sm,
     fontWeight: '600',
-    color: VSColors.text,
-    marginLeft: 4,
+    color: Colors.foreground,
+    marginLeft: Spacing.xs,
     flex: 1,
   },
-  fileRow: {
+  fileItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 6,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
   },
-  fileRowActive: {
-    backgroundColor: VSColors.selection,
+  fileItemActive: {
+    backgroundColor: Colors.primaryBg,
+    borderLeftWidth: 2,
+    borderLeftColor: Colors.primary,
   },
-  fileName: {
-    fontSize: 13,
-    color: VSColors.text,
-    marginLeft: 6,
+  fileItemText: {
+    fontSize: FontSize.sm,
+    color: Colors.foreground,
     flex: 1,
   },
-  main: {
+
+  // Main Editor Area
+  mainArea: {
     flex: 1,
-    borderRightWidth: 1,
-    borderRightColor: VSColors.border,
+    backgroundColor: Colors.background,
   },
   tabBar: {
     flexDirection: 'row',
-    backgroundColor: VSColors.sidebar,
-    borderBottomWidth: 1,
-    borderBottomColor: VSColors.border,
-    height: 35,
     alignItems: 'center',
+    backgroundColor: Colors.surface,
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.border,
+    height: 36,
   },
   tab: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRightWidth: 1,
-    borderRightColor: VSColors.border,
+    paddingHorizontal: Spacing.md,
     height: '100%',
-    maxWidth: 150,
+    borderRightWidth: 1,
+    borderRightColor: Colors.border,
+    maxWidth: 180,
   },
   tabActive: {
-    backgroundColor: VSColors.editor,
-    borderBottomWidth: 1,
-    borderBottomColor: VSColors.accent,
+    backgroundColor: Colors.background,
+    borderBottomWidth: 2,
+    borderBottomColor: Colors.primary,
   },
-  tabText: {
-    fontSize: 12,
-    color: VSColors.textMuted,
+  tabButton: {
     flex: 1,
   },
+  tabText: {
+    fontSize: FontSize.sm,
+    color: Colors.muted,
+  },
   tabTextActive: {
-    color: VSColors.white,
+    color: Colors.foreground,
+    fontWeight: '500',
+  },
+  modifiedDot: {
+    color: Colors.primary,
   },
   tabClose: {
-    marginLeft: 8,
+    marginLeft: Spacing.sm,
     padding: 2,
   },
-  saveBtn: {
-    paddingHorizontal: 12,
+  saveButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: Spacing.md,
+    gap: Spacing.xs,
   },
+  saveButtonText: {
+    fontSize: FontSize.xs,
+    color: Colors.primary,
+    fontWeight: '600',
+  },
+
+  // Editor
   editorContainer: {
-    flex: 2,
-    backgroundColor: VSColors.editor,
+    flex: 1,
+    backgroundColor: Colors.background,
   },
   editor: {
     flex: 1,
-    padding: 8,
+  },
+  codeWrapper: {
+    flexDirection: 'row',
+    padding: Spacing.md,
+  },
+  lineNumbers: {
+    paddingRight: Spacing.md,
+    paddingTop: 2,
+  },
+  lineNumber: {
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    fontSize: FontSize.sm,
+    color: Colors.mutedDark,
+    lineHeight: 20,
+    textAlign: 'right',
+    minWidth: 32,
   },
   codeInput: {
+    flex: 1,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    fontSize: 13,
-    color: VSColors.text,
+    fontSize: FontSize.sm,
+    color: Colors.foreground,
     lineHeight: 20,
     textAlignVertical: 'top',
     minHeight: 300,
   },
-  noFile: {
+  emptyEditor: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
+    paddingHorizontal: Spacing.xl,
   },
-  noFileText: {
-    color: VSColors.textMuted,
-    fontSize: 14,
-    marginTop: 12,
+  emptyText: {
+    fontSize: FontSize.md,
+    color: Colors.muted,
+    marginTop: Spacing.lg,
+    marginBottom: Spacing.xl,
   },
-  openFolderBtn: {
-    marginTop: 16,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    backgroundColor: VSColors.accent,
-    borderRadius: 4,
+  primaryButton: {
+    backgroundColor: Colors.primary,
+    paddingHorizontal: Spacing.xl,
+    paddingVertical: Spacing.md,
+    borderRadius: BorderRadius.md,
   },
-  openFolderBtnText: {
-    color: VSColors.white,
+  primaryButtonText: {
+    color: Colors.foreground,
+    fontSize: FontSize.md,
     fontWeight: '600',
   },
-  terminal: {
-    flex: 1,
-    backgroundColor: VSColors.terminal,
+
+  // Terminal Panel
+  terminalPanel: {
+    backgroundColor: Colors.surface,
     borderTopWidth: 1,
-    borderTopColor: VSColors.border,
-    maxHeight: 200,
+    borderTopColor: Colors.border,
   },
-  terminalMobile: {
+  terminalPanelMobile: {
     position: 'absolute',
     left: 0,
     right: 0,
     bottom: 0,
-    height: 250,
-    maxHeight: 250,
-    zIndex: 50,
-  },
-  terminalHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderBottomWidth: 1,
-    borderBottomColor: VSColors.border,
-  },
-  terminalTitle: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: VSColors.textMuted,
-    letterSpacing: 0.5,
+    zIndex: 100,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 5,
   },
   terminalOutput: {
     flex: 1,
-    padding: 8,
+    padding: Spacing.md,
+  },
+  terminalLine: {
+    flexDirection: 'row',
+    marginBottom: 2,
+  },
+  terminalPrompt: {
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    fontSize: FontSize.sm,
+    color: Colors.green,
+    marginRight: Spacing.xs,
   },
   terminalText: {
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    fontSize: 12,
-    color: VSColors.text,
-    lineHeight: 18,
+    fontSize: FontSize.sm,
+    color: Colors.foreground,
+    flex: 1,
   },
-  terminalInputRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 8,
-    paddingVertical: 8,
-    borderTopWidth: 1,
-    borderTopColor: VSColors.border,
-    gap: 8,
+  terminalTextCommand: {
+    color: Colors.greenLight,
+    fontWeight: '500',
   },
-  terminalPrompt: {
-    color: VSColors.success,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    fontSize: 12,
+  terminalTextError: {
+    color: Colors.red,
   },
   terminalInput: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.md,
+    borderTopWidth: 1,
+    borderTopColor: Colors.border,
+    gap: Spacing.sm,
+  },
+  terminalTextInput: {
     flex: 1,
-    color: VSColors.text,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    fontSize: 12,
-    padding: 0,
+    fontSize: FontSize.sm,
+    color: Colors.foreground,
   },
   terminalSendBtn: {
-    padding: 8,
-    backgroundColor: VSColors.inputBg,
-    borderRadius: 4,
+    padding: Spacing.sm,
   },
-  panelCloseBtn: {
-    padding: 4,
+
+  // Agent Panel
+  agentPanel: {
+    backgroundColor: Colors.surface,
+    borderTopWidth: 1,
+    borderTopColor: Colors.border,
   },
-  copilotPanel: {
-    width: 220,
-    backgroundColor: VSColors.sidebar,
-  },
-  copilotPanelMobile: {
+  agentPanelMobile: {
     position: 'absolute',
     left: 0,
     right: 0,
     bottom: 0,
-    width: '100%',
-    height: 350,
-    borderTopWidth: 1,
-    borderTopColor: VSColors.border,
-    zIndex: 50,
-  },
-  copilotPanelTablet: {
-    width: 280,
-  },
-  copilotHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: VSColors.border,
-  },
-  copilotTitle: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: VSColors.textMuted,
-    letterSpacing: 0.5,
-    marginLeft: 6,
-    marginRight: 6,
-  },
-  providerBadge: {
-    fontSize: 10,
-    color: VSColors.success,
-    marginRight: 6,
-  },
-  agentToggle: {
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 4,
-    borderWidth: 1,
-    borderColor: VSColors.border,
-    backgroundColor: VSColors.inputBg,
-  },
-  agentToggleOn: {
-    borderColor: VSColors.accent,
-    backgroundColor: VSColors.accent + '33',
-  },
-  agentToggleText: {
-    fontSize: 10,
-    color: VSColors.text,
-    fontWeight: '600',
+    zIndex: 100,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 5,
   },
   agentSelector: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 4,
-    backgroundColor: VSColors.inputBg,
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: 4,
+    backgroundColor: Colors.primaryBg,
+    borderRadius: BorderRadius.sm,
     borderWidth: 1,
-    borderColor: VSColors.accent + '66',
-    marginLeft: 6,
+    borderColor: Colors.primary + '40',
+    marginLeft: Spacing.md,
+    gap: Spacing.xs,
   },
   agentSelectorText: {
-    fontSize: 10,
-    color: VSColors.accent,
+    fontSize: FontSize.xs,
+    color: Colors.primary,
     fontWeight: '600',
   },
-  agentPickerDropdown: {
-    backgroundColor: VSColors.sidebar,
-    borderWidth: 1,
-    borderColor: VSColors.border,
-    borderRadius: 6,
-    marginHorizontal: 8,
-    marginBottom: 4,
+  stopButton: {
+    marginLeft: Spacing.md,
+    padding: Spacing.xs,
+  },
+  agentPickerMenu: {
+    backgroundColor: Colors.card,
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.border,
+    marginHorizontal: Spacing.md,
+    marginVertical: Spacing.sm,
+    borderRadius: BorderRadius.md,
     overflow: 'hidden',
   },
   agentPickerItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    padding: 10,
-    gap: 10,
+    padding: Spacing.md,
     borderBottomWidth: 1,
-    borderBottomColor: VSColors.border,
+    borderBottomColor: Colors.border,
   },
   agentPickerItemActive: {
-    backgroundColor: VSColors.accent + '22',
-    borderLeftWidth: 2,
-    borderLeftColor: VSColors.accent,
-  },
-  agentPickerInfo: {
-    flex: 1,
+    backgroundColor: Colors.primaryBg,
   },
   agentPickerName: {
-    fontSize: 12,
+    fontSize: FontSize.sm,
     fontWeight: '600',
-    color: VSColors.text,
+    color: Colors.foreground,
   },
   agentPickerNameActive: {
-    color: VSColors.accent,
+    color: Colors.primary,
   },
   agentPickerDesc: {
-    fontSize: 10,
-    color: VSColors.textMuted,
-    marginTop: 1,
+    fontSize: FontSize.xs,
+    color: Colors.muted,
+    marginTop: 2,
   },
+
+  // Chat
   chatMessages: {
     flex: 1,
-    padding: 8,
+    padding: Spacing.md,
   },
-  chatBubble: {
-    marginBottom: 8,
-    padding: 8,
-    borderRadius: 6,
-    maxWidth: '100%',
+  chatMessage: {
+    marginBottom: Spacing.md,
+    padding: Spacing.md,
+    borderRadius: BorderRadius.md,
+    maxWidth: '85%',
   },
-  userBubble: {
-    backgroundColor: VSColors.accent,
+  chatMessageUser: {
+    backgroundColor: Colors.primaryBg,
     alignSelf: 'flex-end',
+    borderWidth: 1,
+    borderColor: Colors.primary + '40',
   },
-  aiBubble: {
-    backgroundColor: VSColors.inputBg,
+  chatMessageAssistant: {
+    backgroundColor: Colors.card,
     alignSelf: 'flex-start',
+    borderWidth: 1,
+    borderColor: Colors.border,
   },
-  chatText: {
-    fontSize: 12,
-    color: VSColors.text,
-    lineHeight: 18,
+  chatMessageSystem: {
+    backgroundColor: Colors.surface,
+    alignSelf: 'center',
+    borderWidth: 1,
+    borderColor: Colors.borderLight,
   },
-  chatError: {
-    color: VSColors.error,
+  chatMessageText: {
+    fontSize: FontSize.sm,
+    color: Colors.foreground,
+    lineHeight: 20,
   },
-  diffBox: {
-    marginTop: 8,
-    padding: 8,
-    backgroundColor: VSColors.bg,
-    borderRadius: 4,
+  chatMessageError: {
+    color: Colors.red,
   },
-  diffText: {
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    fontSize: 10,
-    color: VSColors.text,
+
+  // Thinking
+  thinkingContainer: {
+    marginBottom: Spacing.md,
+    backgroundColor: Colors.card,
+    borderRadius: BorderRadius.md,
+    borderWidth: 1,
+    borderColor: Colors.borderLight,
+    overflow: 'hidden',
   },
-  applyBtn: {
-    marginTop: 8,
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    backgroundColor: VSColors.success,
-    borderRadius: 4,
-    alignSelf: 'flex-start',
-  },
-  applyBtnText: {
-    color: VSColors.bg,
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  chatInputRow: {
+  thinkingHeader: {
     flexDirection: 'row',
-    alignItems: 'flex-end',
-    padding: 8,
-    borderTopWidth: 1,
-    borderTopColor: VSColors.border,
-    gap: 8,
+    alignItems: 'center',
+    padding: Spacing.md,
+    gap: Spacing.sm,
   },
-  chatInputRowMobile: {
-    paddingBottom: 12,
+  thinkingPulse: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: Colors.primaryBg,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
-  chatInput: {
+  thinkingHeaderText: {
+    fontSize: FontSize.sm,
+    color: Colors.primary,
+    fontWeight: '600',
     flex: 1,
-    backgroundColor: VSColors.inputBg,
-    color: VSColors.text,
-    fontSize: 12,
-    borderRadius: 4,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    maxHeight: 80,
   },
-  chatInputMobile: {
-    fontSize: 14,
-    paddingVertical: 10,
-    maxHeight: 100,
-  },
-  sendBtn: {
-    backgroundColor: VSColors.accent,
-    padding: 10,
-    borderRadius: 4,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  sendBtnDisabled: {
-    backgroundColor: VSColors.inputBg,
-  },
-  mobileBottomBar: {
-    position: 'absolute',
-    left: 48,
-    right: 0,
-    bottom: 0,
-    height: 56,
+  thinkingStep: {
     flexDirection: 'row',
-    backgroundColor: VSColors.sidebar,
-    borderTopWidth: 1,
-    borderTopColor: VSColors.border,
-    justifyContent: 'space-around',
-    alignItems: 'center',
-    paddingHorizontal: 16,
+    alignItems: 'flex-start',
+    padding: Spacing.md,
+    paddingTop: Spacing.sm,
+    gap: Spacing.sm,
   },
-  mobileBottomBtn: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 8,
-    paddingHorizontal: 16,
-  },
-  mobileBottomBtnText: {
-    fontSize: 10,
-    color: VSColors.textMuted,
-    marginTop: 4,
-  },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.7)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  modal: {
-    backgroundColor: VSColors.sidebar,
-    borderRadius: 8,
-    padding: 20,
-    width: '80%',
-    maxWidth: 400,
-  },
-  modalTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: VSColors.text,
-    marginBottom: 16,
-  },
-  modalInput: {
-    backgroundColor: VSColors.inputBg,
-    color: VSColors.text,
-    fontSize: 14,
-    borderRadius: 4,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    marginBottom: 16,
-  },
-  modalBtns: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    gap: 12,
-  },
-  modalBtnCancel: {
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-  },
-  modalBtnOpen: {
-    backgroundColor: VSColors.accent,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 4,
-  },
-  modalBtnText: {
-    color: VSColors.text,
-    fontWeight: '600',
-  },
-  thinkingBubble: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    padding: 8,
-    marginBottom: 8,
-    backgroundColor: VSColors.inputBg,
-    borderRadius: 6,
-    gap: 8,
-  },
-  thinkingText: {
-    fontSize: 12,
-    color: VSColors.textMuted,
+  thinkingStepText: {
+    fontSize: FontSize.xs,
+    color: Colors.muted,
     fontStyle: 'italic',
+    flex: 1,
   },
-  toolCallBubble: {
-    marginBottom: 6,
-    padding: 8,
-    backgroundColor: '#1a2a1a',
-    borderRadius: 6,
-    borderLeftWidth: 2,
-    borderLeftColor: VSColors.accent,
+  toolCallCard: {
+    padding: Spacing.md,
+    paddingTop: Spacing.sm,
+    backgroundColor: Colors.codeBg,
+    borderTopWidth: 1,
+    borderTopColor: Colors.border,
   },
   toolCallHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    gap: Spacing.xs,
   },
   toolCallName: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: VSColors.accent,
+    fontSize: FontSize.xs,
+    fontWeight: '700',
+    color: Colors.cyan,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    flex: 1,
   },
   toolCallStatus: {
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  toolCallSuccess: {
-    color: VSColors.success,
-  },
-  toolCallFail: {
-    color: VSColors.error,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.xs,
   },
   toolCallDuration: {
-    fontSize: 10,
-    color: VSColors.textMuted,
-    marginLeft: 'auto',
+    fontSize: FontSize.xs,
+    color: Colors.mutedDark,
   },
   toolCallArgs: {
-    fontSize: 10,
-    color: VSColors.textMuted,
+    fontSize: FontSize.xs,
+    color: Colors.muted,
+    marginTop: Spacing.xs,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    marginTop: 4,
   },
-  toolCallOutput: {
-    fontSize: 10,
-    color: VSColors.text,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    marginTop: 4,
-    backgroundColor: VSColors.bg,
-    padding: 4,
-    borderRadius: 3,
+
+  // Chat Input
+  chatInputContainer: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    padding: Spacing.md,
+    borderTopWidth: 1,
+    borderTopColor: Colors.border,
+    gap: Spacing.sm,
+  },
+  chatInput: {
+    flex: 1,
+    backgroundColor: Colors.input,
+    color: Colors.foreground,
+    fontSize: FontSize.sm,
+    borderRadius: BorderRadius.md,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
+    maxHeight: 100,
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  chatSendButton: {
+    backgroundColor: Colors.primary,
+    width: 40,
+    height: 40,
+    borderRadius: BorderRadius.md,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  chatSendButtonDisabled: {
+    backgroundColor: Colors.mutedDark,
+    opacity: 0.5,
+  },
+
+  // Overlay
+  overlay: {
+    position: 'absolute',
+    left: ACTIVITY_BAR_WIDTH,
+    top: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    zIndex: 99,
+  },
+
+  // Modal
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.8)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: Spacing.xl,
+  },
+  modal: {
+    backgroundColor: Colors.surface,
+    borderRadius: BorderRadius.lg,
+    padding: Spacing.xl,
+    width: '100%',
+    maxWidth: 400,
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  modalTitle: {
+    fontSize: FontSize.lg,
+    fontWeight: '700',
+    color: Colors.foreground,
+    marginBottom: Spacing.lg,
+  },
+  modalInput: {
+    backgroundColor: Colors.input,
+    color: Colors.foreground,
+    fontSize: FontSize.md,
+    borderRadius: BorderRadius.md,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.md,
+    marginBottom: Spacing.lg,
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  modalButtons: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: Spacing.md,
+  },
+  modalButton: {
+    paddingHorizontal: Spacing.lg,
+    paddingVertical: Spacing.md,
+    borderRadius: BorderRadius.md,
+  },
+  modalButtonPrimary: {
+    backgroundColor: Colors.primary,
+  },
+  modalButtonSecondary: {
+    backgroundColor: Colors.card,
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  modalButtonText: {
+    color: Colors.foreground,
+    fontWeight: '600',
+    fontSize: FontSize.md,
+  },
+  modalButtonTextSecondary: {
+    color: Colors.muted,
+    fontWeight: '600',
+    fontSize: FontSize.md,
+  },
+
+  // Utility
+  centerLoader: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingVertical: Spacing.xxl,
   },
 });

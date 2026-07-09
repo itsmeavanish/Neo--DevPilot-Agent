@@ -364,6 +364,7 @@ export async function ping(): Promise<CommandResponse> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function runSystemCommand(command: string): Promise<CommandResponse> {
+  await configManager.init();
   const result = await executeCommand(command);
   return {
     status: result.success ? 'success' : 'error',
@@ -410,7 +411,10 @@ export async function openInCursor(path: string): Promise<{ status: string; mess
 // Project / files
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** When paired, list/read/info run on the laptop that runs the agent (not the API host). */
+/**
+ * When paired, list/read/info run on the laptop that runs the agent (not the API host).
+ * Note: Callers must ensure configManager.init() has been called before using this.
+ */
 function pairedAgentFsPrefix(): string | null {
   const code = configManager.pairingCode?.trim();
   if (!code) return null;
@@ -421,13 +425,20 @@ export async function listDirectory(
   path: string,
   showHidden = false
 ): Promise<DirectoryListing> {
+  await configManager.init();
   const agentBase = pairedAgentFsPrefix();
   try {
     if (agentBase) {
-      return await apiPost<DirectoryListing>(`${agentBase}/fs/list`, {
-        path,
-        show_hidden: showHidden,
-      });
+      const result = await fetchWithTimeout(`${configManager.backendUrl}${agentBase}/fs/list`, {
+        method: 'POST',
+        headers: await buildHeaders(),
+        body: JSON.stringify({ path, show_hidden: showHidden }),
+      }, 30000);
+      if (!result.ok) {
+        const errBody = await result.json().catch(() => ({}));
+        throw new Error((errBody as { detail?: string }).detail || `List directory failed: ${result.status}`);
+      }
+      return await result.json() as DirectoryListing;
     }
     return await apiPost<DirectoryListing>('/project/list', {
       path,
@@ -440,10 +451,20 @@ export async function listDirectory(
 }
 
 export async function readFile(path: string, max_lines = 500): Promise<FileContent> {
+  await configManager.init();
   const agentBase = pairedAgentFsPrefix();
   try {
     if (agentBase) {
-      return await apiPost<FileContent>(`${agentBase}/fs/read`, { path, max_lines });
+      const result = await fetchWithTimeout(`${configManager.backendUrl}${agentBase}/fs/read`, {
+        method: 'POST',
+        headers: await buildHeaders(),
+        body: JSON.stringify({ path, max_lines }),
+      }, 60000);
+      if (!result.ok) {
+        const errBody = await result.json().catch(() => ({}));
+        throw new Error((errBody as { detail?: string }).detail || `Read file failed: ${result.status}`);
+      }
+      return await result.json() as FileContent;
     }
     return await apiPost<FileContent>('/project/read', { path, max_lines });
   } catch (error: unknown) {
@@ -464,10 +485,20 @@ export async function writeFile(
   content: string,
   create_backup = true
 ): Promise<{ success: boolean; path: string; message: string; backup_path?: string }> {
+  await configManager.init();
   const agentBase = pairedAgentFsPrefix();
   try {
     if (agentBase) {
-      return await apiPost(`${agentBase}/fs/write`, { path, content, create_backup });
+      const result = await fetchWithTimeout(`${configManager.backendUrl}${agentBase}/fs/write`, {
+        method: 'POST',
+        headers: await buildHeaders(),
+        body: JSON.stringify({ path, content, create_backup }),
+      }, 60000);
+      if (!result.ok) {
+        const errBody = await result.json().catch(() => ({}));
+        throw new Error((errBody as { detail?: string }).detail || `Write file failed: ${result.status}`);
+      }
+      return await result.json() as { success: boolean; path: string; message: string; backup_path?: string };
     }
     return await apiPost('/project/write', { path, content, create_backup });
   } catch (error: unknown) {
@@ -477,6 +508,7 @@ export async function writeFile(
 }
 
 export async function getProjectInfo(path: string): Promise<ProjectInfo> {
+  await configManager.init();
   const agentBase = pairedAgentFsPrefix();
   try {
     if (agentBase) {
@@ -610,22 +642,38 @@ export function chatWithAgentStream(
   callbacks?: {
     onChunk?: (chunk: string) => void;
     onSessionId?: (sid: string) => void;
+    onThinking?: (content: string) => void;
+    onToolCall?: (tool: string, args: Record<string, unknown>) => void;
+    onToolResult?: (tool: string, result: Record<string, unknown>) => void;
     onDone?: (fullText: string) => void;
     onError?: (error: string) => void;
   }
 ): () => void {
-  const controller = new AbortController();
+  let aborted = false;
 
-  (async () => {
+  const doStream = async () => {
     try {
       const headers = await buildHeaders();
+      const url = `${configManager.backendUrl}/api/v1/agent/chat/stream`;
+      const body = JSON.stringify({
+        message,
+        history,
+        session_id,
+        workspace_root: configManager.workspaceRoot || undefined,
+        pairing_code: configManager.pairingCode || undefined,
+      });
 
-      // Try streaming first
-      const res = await fetch(
-        `${configManager.backendUrl}/api/v1/agent/chat/stream`,
+      // Use XMLHttpRequest for progressive SSE reading (works in React Native)
+      const streamed = await _xhrStream(url, body, headers, callbacks, () => aborted);
+      if (streamed) return;
+
+      // XHR failed (network error) — try fallback
+      if (aborted) return;
+      const fallbackRes = await fetch(
+        `${configManager.backendUrl}/api/v1/agent/chat`,
         {
           method: 'POST',
-          headers,
+          headers: await buildHeaders(),
           body: JSON.stringify({
             message,
             history,
@@ -633,165 +681,176 @@ export function chatWithAgentStream(
             workspace_root: configManager.workspaceRoot || undefined,
             pairing_code: configManager.pairingCode || undefined,
           }),
-          signal: controller.signal,
         }
       );
-
-      if (!res.ok) {
-        const errBody = await res.json().catch(() => ({}));
+      if (!fallbackRes.ok) {
+        const errBody = await fallbackRes.json().catch(() => ({}));
         callbacks?.onError?.(
-          (errBody as { detail?: string }).detail || `Stream error ${res.status}`
+          (errBody as { detail?: string }).detail || `Chat error ${fallbackRes.status}`
         );
         return;
       }
-
-      const reader = res.body?.getReader();
-      if (!reader) {
-        // React Native doesn't support ReadableStream — fall back to non-streaming
-        // Try to parse the full SSE response as text
-        const text = await res.text();
-        if (text) {
-          _parseSSEText(text, callbacks);
-          return;
-        }
-
-        // If text parsing also fails, use the non-streaming endpoint
-        const fallbackRes = await fetch(
-          `${configManager.backendUrl}/api/v1/agent/chat`,
-          {
-            method: 'POST',
-            headers: await buildHeaders(),
-            body: JSON.stringify({
-              message,
-              history,
-              session_id,
-              workspace_root: configManager.workspaceRoot || undefined,
-              pairing_code: configManager.pairingCode || undefined,
-            }),
-            signal: controller.signal,
-          }
-        );
-        if (!fallbackRes.ok) {
-          const errBody = await fallbackRes.json().catch(() => ({}));
-          callbacks?.onError?.(
-            (errBody as { detail?: string }).detail || `Chat error ${fallbackRes.status}`
-          );
-          return;
-        }
-        const data = await fallbackRes.json() as { session_id: string; response: string; error?: string };
-        if (data.error) {
-          callbacks?.onError?.(data.error);
-          return;
-        }
-        if (data.session_id) callbacks?.onSessionId?.(data.session_id);
-        if (data.response) {
-          callbacks?.onChunk?.(data.response);
-          callbacks?.onDone?.(data.response);
-        }
+      const data = await fallbackRes.json() as { session_id: string; response: string; error?: string };
+      if (data.error) {
+        callbacks?.onError?.(data.error);
         return;
       }
-
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let fullText = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          const payload = line.slice(6).trim();
-          if (payload === '[DONE]') {
-            callbacks?.onDone?.(fullText);
-            return;
-          }
-          try {
-            const evt = JSON.parse(payload) as {
-              type: string;
-              content?: string;
-              session_id?: string;
-            };
-            if (evt.type === 'session' && evt.session_id) {
-              callbacks?.onSessionId?.(evt.session_id);
-            } else if (evt.type === 'chunk' && evt.content) {
-              fullText += evt.content;
-              callbacks?.onChunk?.(evt.content);
-            } else if (evt.type === 'error') {
-              callbacks?.onError?.(evt.content || 'Unknown streaming error');
-              return;
-            }
-          } catch {
-            // skip malformed JSON lines
-          }
-        }
-      }
-      if (fullText) {
-        callbacks?.onDone?.(fullText);
+      if (data.session_id) callbacks?.onSessionId?.(data.session_id);
+      if (data.response) {
+        callbacks?.onChunk?.(data.response);
+        callbacks?.onDone?.(data.response);
       }
     } catch (err) {
-      if ((err as Error).name !== 'AbortError') {
+      if (!aborted) {
         callbacks?.onError?.(
           err instanceof Error ? err.message : 'Stream connection failed'
         );
       }
     }
-  })();
+  };
 
-  return () => controller.abort();
+  doStream();
+
+  return () => { aborted = true; };
 }
 
-/** Parse a complete SSE text response (used when ReadableStream is unavailable). */
-function _parseSSEText(
-  text: string,
+/**
+ * Progressive SSE streaming using XMLHttpRequest.
+ * Works in React Native where fetch ReadableStream is unavailable.
+ * Returns true if streaming was handled, false to fall back.
+ */
+function _xhrStream(
+  url: string,
+  body: string,
+  headers: Record<string, string>,
   callbacks?: {
     onChunk?: (chunk: string) => void;
     onSessionId?: (sid: string) => void;
+    onThinking?: (content: string) => void;
+    onToolCall?: (tool: string, args: Record<string, unknown>) => void;
+    onToolResult?: (tool: string, result: Record<string, unknown>) => void;
     onDone?: (fullText: string) => void;
     onError?: (error: string) => void;
-  }
-): void {
-  let fullText = '';
-  const lines = text.split('\n');
+  },
+  isAborted?: () => boolean,
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    const xhr = new XMLHttpRequest();
+    let lastIndex = 0;
+    let buffer = '';
+    let fullText = '';
+    let resolved = false;
 
-  for (const line of lines) {
-    if (!line.startsWith('data: ')) continue;
-    const payload = line.slice(6).trim();
-    if (payload === '[DONE]') {
-      callbacks?.onDone?.(fullText);
-      return;
-    }
-    try {
-      const evt = JSON.parse(payload) as {
-        type: string;
-        content?: string;
-        session_id?: string;
-      };
-      if (evt.type === 'session' && evt.session_id) {
-        callbacks?.onSessionId?.(evt.session_id);
-      } else if ((evt.type === 'chunk' || evt.type === 'token') && evt.content) {
-        fullText += evt.content;
-        callbacks?.onChunk?.(evt.content);
-      } else if (evt.type === 'done' && evt.content) {
-        fullText = evt.content;
-        callbacks?.onDone?.(fullText);
-        return;
-      } else if (evt.type === 'error') {
-        callbacks?.onError?.(evt.content || 'Unknown streaming error');
+    const finish = (success: boolean) => {
+      if (resolved) return;
+      resolved = true;
+      resolve(success);
+    };
+
+    xhr.open('POST', url, true);
+    Object.entries(headers).forEach(([k, v]) => xhr.setRequestHeader(k, v));
+
+    xhr.onreadystatechange = () => {
+      if (isAborted?.()) {
+        xhr.abort();
+        finish(true);
         return;
       }
-    } catch {
-      // skip malformed JSON lines
-    }
-  }
-  if (fullText) {
-    callbacks?.onDone?.(fullText);
-  }
+
+      // Process incremental data as it arrives (readyState 3 = LOADING)
+      if (xhr.readyState >= 3 && xhr.responseText) {
+        const newData = xhr.responseText.slice(lastIndex);
+        lastIndex = xhr.responseText.length;
+
+        if (newData) {
+          buffer += newData;
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue;
+            const payload = line.slice(6).trim();
+            if (payload === '[DONE]') {
+              callbacks?.onDone?.(fullText);
+              finish(true);
+              return;
+            }
+            try {
+              const evt = JSON.parse(payload) as {
+                type: string;
+                content?: string;
+                session_id?: string;
+                tool?: string;
+                args?: Record<string, unknown>;
+                result?: Record<string, unknown>;
+              };
+              if (evt.type === 'session' && evt.session_id) {
+                callbacks?.onSessionId?.(evt.session_id);
+              } else if (evt.type === 'thinking' && evt.content) {
+                callbacks?.onThinking?.(evt.content);
+              } else if (evt.type === 'tool_call' && evt.tool) {
+                callbacks?.onToolCall?.(evt.tool, evt.args || {});
+              } else if (evt.type === 'tool_result' && evt.tool) {
+                callbacks?.onToolResult?.(evt.tool, evt.result || {});
+              } else if ((evt.type === 'chunk' || evt.type === 'token') && evt.content) {
+                fullText += evt.content;
+                callbacks?.onChunk?.(evt.content);
+              } else if (evt.type === 'done' && evt.content) {
+                fullText = evt.content;
+                callbacks?.onDone?.(fullText);
+                finish(true);
+                return;
+              } else if (evt.type === 'error') {
+                callbacks?.onError?.(evt.content || 'Unknown streaming error');
+                finish(true);
+                return;
+              }
+            } catch {
+              // skip malformed JSON
+            }
+          }
+        }
+      }
+
+      // Request complete
+      if (xhr.readyState === 4) {
+        if (!resolved) {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            // Stream completed without explicit [DONE] — dispatch final content
+            if (fullText) callbacks?.onDone?.(fullText);
+            finish(true);
+          } else if (xhr.status === 0) {
+            // Network error or abort
+            finish(false);
+          } else {
+            try {
+              const err = JSON.parse(xhr.responseText);
+              callbacks?.onError?.(err?.detail || err?.message || `Stream error ${xhr.status}`);
+            } catch {
+              callbacks?.onError?.(`Stream error ${xhr.status}`);
+            }
+            finish(true);
+          }
+        }
+      }
+    };
+
+    xhr.onerror = () => {
+      if (!resolved) {
+        finish(false);
+      }
+    };
+
+    xhr.ontimeout = () => {
+      callbacks?.onError?.('Stream request timed out');
+      finish(true);
+    };
+
+    xhr.timeout = 120000;
+    xhr.send(body);
+  });
 }
+
 
 /**
  * Search files in a project directory for a text pattern.
@@ -812,6 +871,7 @@ export async function searchFiles(
   total_matches: number;
   error?: string;
 }> {
+  await configManager.init();
   const agentBase = pairedAgentFsPrefix();
   try {
     if (agentBase) {
@@ -877,6 +937,7 @@ export async function copilotEdit(
 
 export async function getCurrentWorkingDirectory(): Promise<string> {
   try {
+    await configManager.init();
     const result = await executeCommand('pwd || cd');
     if (result.success && result.stdout.trim()) {
       return result.stdout.trim();
@@ -1007,75 +1068,30 @@ export function ideAgentStream(
   callbacks?: IDEAgentStreamCallbacks,
   options?: { sessionId?: string; maxSteps?: number }
 ): () => void {
-  const controller = new AbortController();
+  let aborted = false;
 
   (async () => {
     try {
       await configManager.init();
       const headers = await buildHeaders();
+      const url = `${configManager.backendUrl}/project/ai/agent-stream`;
+      const body = JSON.stringify({
+        message,
+        session_id: options?.sessionId || undefined,
+        pairing_code: configManager.pairingCode?.trim().toUpperCase() || undefined,
+        workspace_root: workspaceRoot || configManager.workspaceRoot || undefined,
+        max_steps: options?.maxSteps || 15,
+      });
 
-      const res = await fetch(
-        `${configManager.backendUrl}/project/ai/agent-stream`,
-        {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({
-            message,
-            session_id: options?.sessionId || undefined,
-            pairing_code: configManager.pairingCode?.trim().toUpperCase() || undefined,
-            workspace_root: workspaceRoot || configManager.workspaceRoot || undefined,
-            max_steps: options?.maxSteps || 15,
-          }),
-          signal: controller.signal,
-        }
-      );
+      // Use XHR for progressive streaming (works in React Native)
+      const streamed = await _xhrAgentStream(url, body, headers, callbacks, () => aborted);
+      if (streamed) return;
 
-      if (!res.ok) {
-        const errBody = await res.json().catch(() => ({}));
-        callbacks?.onError?.(
-          (errBody as { detail?: string }).detail || `Agent stream error ${res.status}`
-        );
-        return;
-      }
-
-      // React Native may not support ReadableStream — try reader first, fallback to text
-      const reader = res.body?.getReader();
-      let rawText: string;
-
-      if (reader) {
-        const decoder = new TextDecoder();
-        let buffer = '';
-        let fullText = '';
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n');
-          buffer = lines.pop() || '';
-
-          for (const line of lines) {
-            if (!line.startsWith('data: ')) continue;
-            const payload = line.slice(6).trim();
-            if (payload === '[DONE]') {
-              if (fullText) callbacks?.onDone?.(fullText);
-              return;
-            }
-            try {
-              const evt = JSON.parse(payload) as AgentStreamEvent;
-              fullText = _dispatchAgentEvent(evt, fullText, callbacks);
-            } catch { /* skip malformed */ }
-          }
-        }
-        if (fullText) callbacks?.onDone?.(fullText);
-      } else {
-        // Fallback: read entire response as text and parse SSE lines
-        rawText = await res.text();
-        _parseAgentSSEText(rawText, callbacks);
-      }
+      // XHR streaming failed (network error)
+      if (aborted) return;
+      callbacks?.onError?.('Connection to agent failed. Check your network and try again.');
     } catch (err) {
-      if ((err as Error).name !== 'AbortError') {
+      if (!aborted) {
         callbacks?.onError?.(
           err instanceof Error ? err.message : 'Agent stream connection failed'
         );
@@ -1083,7 +1099,101 @@ export function ideAgentStream(
     }
   })();
 
-  return () => controller.abort();
+  return () => { aborted = true; };
+}
+
+/**
+ * XHR-based progressive SSE streaming for agent-stream endpoint.
+ */
+function _xhrAgentStream(
+  url: string,
+  body: string,
+  headers: Record<string, string>,
+  callbacks?: IDEAgentStreamCallbacks,
+  isAborted?: () => boolean,
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    const xhr = new XMLHttpRequest();
+    let lastIndex = 0;
+    let buffer = '';
+    let fullText = '';
+    let resolved = false;
+
+    const finish = (success: boolean) => {
+      if (resolved) return;
+      resolved = true;
+      resolve(success);
+    };
+
+    xhr.open('POST', url, true);
+    Object.entries(headers).forEach(([k, v]) => xhr.setRequestHeader(k, v));
+
+    xhr.onreadystatechange = () => {
+      if (isAborted?.()) {
+        xhr.abort();
+        finish(true);
+        return;
+      }
+
+      if (xhr.readyState >= 3 && xhr.responseText) {
+        const newData = xhr.responseText.slice(lastIndex);
+        lastIndex = xhr.responseText.length;
+
+        if (newData) {
+          buffer += newData;
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue;
+            const payload = line.slice(6).trim();
+            if (payload === '[DONE]') {
+              // Only call onDone if it wasn't already triggered by a "done" event
+              if (!resolved && fullText) callbacks?.onDone?.(fullText);
+              finish(true);
+              return;
+            }
+            try {
+              const evt = JSON.parse(payload) as AgentStreamEvent;
+              const wasDone = evt.type === 'done';
+              fullText = _dispatchAgentEvent(evt, fullText, callbacks);
+              // If a "done" event was dispatched, mark as resolved to avoid double onDone
+              if (wasDone) finish(true);
+            } catch { /* skip malformed */ }
+          }
+        }
+      }
+
+      if (xhr.readyState === 4) {
+        if (!resolved) {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            // Stream completed without explicit [DONE] — dispatch final content
+            if (fullText) callbacks?.onDone?.(fullText);
+            finish(true);
+          } else if (xhr.status === 0) {
+            finish(false);
+          } else {
+            try {
+              const err = JSON.parse(xhr.responseText);
+              callbacks?.onError?.(err?.detail || err?.message || `Agent stream error ${xhr.status}`);
+            } catch {
+              callbacks?.onError?.(`Agent stream error ${xhr.status}`);
+            }
+            finish(true);
+          }
+        }
+      }
+    };
+
+    xhr.onerror = () => { if (!resolved) finish(false); };
+    xhr.ontimeout = () => {
+      callbacks?.onError?.('Agent stream timed out');
+      finish(true);
+    };
+
+    xhr.timeout = 180000;
+    xhr.send(body);
+  });
 }
 
 function _dispatchAgentEvent(evt: AgentStreamEvent, fullText: string, callbacks?: IDEAgentStreamCallbacks): string {
@@ -1126,24 +1236,6 @@ function _dispatchAgentEvent(evt: AgentStreamEvent, fullText: string, callbacks?
   return fullText;
 }
 
-function _parseAgentSSEText(text: string, callbacks?: IDEAgentStreamCallbacks): void {
-  let fullText = '';
-  const lines = text.split('\n');
-
-  for (const line of lines) {
-    if (!line.startsWith('data: ')) continue;
-    const payload = line.slice(6).trim();
-    if (payload === '[DONE]') {
-      if (fullText) callbacks?.onDone?.(fullText);
-      return;
-    }
-    try {
-      const evt = JSON.parse(payload) as AgentStreamEvent;
-      fullText = _dispatchAgentEvent(evt, fullText, callbacks);
-    } catch { /* skip malformed */ }
-  }
-  if (fullText) callbacks?.onDone?.(fullText);
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // External Agents — Claude Code & Jules
@@ -1158,69 +1250,26 @@ export function claudeCodeStream(
   workspaceRoot: string,
   callbacks?: IDEAgentStreamCallbacks,
 ): () => void {
-  const controller = new AbortController();
+  let aborted = false;
 
   (async () => {
     try {
       await configManager.init();
       const headers = await buildHeaders();
+      const url = `${configManager.backendUrl}/project/ai/claude-code-stream`;
+      const body = JSON.stringify({
+        message,
+        pairing_code: configManager.pairingCode?.trim().toUpperCase() || undefined,
+        workspace_root: workspaceRoot || configManager.workspaceRoot || undefined,
+      });
 
-      const res = await fetch(
-        `${configManager.backendUrl}/project/ai/claude-code-stream`,
-        {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({
-            message,
-            pairing_code: configManager.pairingCode?.trim().toUpperCase() || undefined,
-            workspace_root: workspaceRoot || configManager.workspaceRoot || undefined,
-          }),
-          signal: controller.signal,
-        }
-      );
+      const streamed = await _xhrAgentStream(url, body, headers, callbacks, () => aborted);
+      if (streamed) return;
 
-      if (!res.ok) {
-        const errBody = await res.json().catch(() => ({}));
-        callbacks?.onError?.(
-          (errBody as { detail?: string }).detail || `Claude Code error ${res.status}`
-        );
-        return;
-      }
-
-      const reader = res.body?.getReader();
-      if (reader) {
-        const decoder = new TextDecoder();
-        let buffer = '';
-        let fullText = '';
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n');
-          buffer = lines.pop() || '';
-
-          for (const line of lines) {
-            if (!line.startsWith('data: ')) continue;
-            const payload = line.slice(6).trim();
-            if (payload === '[DONE]') {
-              if (fullText) callbacks?.onDone?.(fullText);
-              return;
-            }
-            try {
-              const evt = JSON.parse(payload) as AgentStreamEvent;
-              fullText = _dispatchAgentEvent(evt, fullText, callbacks);
-            } catch { /* skip malformed */ }
-          }
-        }
-        if (fullText) callbacks?.onDone?.(fullText);
-      } else {
-        const rawText = await res.text();
-        _parseAgentSSEText(rawText, callbacks);
-      }
+      if (aborted) return;
+      callbacks?.onError?.('Connection to Claude Code failed. Check your network and try again.');
     } catch (err) {
-      if ((err as Error).name !== 'AbortError') {
+      if (!aborted) {
         callbacks?.onError?.(
           err instanceof Error ? err.message : 'Claude Code connection failed'
         );
@@ -1228,7 +1277,7 @@ export function claudeCodeStream(
     }
   })();
 
-  return () => controller.abort();
+  return () => { aborted = true; };
 }
 
 /**

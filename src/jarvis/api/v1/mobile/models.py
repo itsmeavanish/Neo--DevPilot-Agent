@@ -124,7 +124,7 @@ class AgentStreamRequest(BaseModel):
     session_id: Optional[str] = None
     pairing_code: Optional[str] = None
     workspace_root: Optional[str] = None
-    max_steps: int = Field(default=8, ge=1, le=15)
+    max_steps: int = Field(default=8, ge=1, le=30)
 
 class AIKeysRequest(BaseModel):
     freellm_api_key: Optional[str] = None
