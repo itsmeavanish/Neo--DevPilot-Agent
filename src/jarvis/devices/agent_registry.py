@@ -37,6 +37,8 @@ class RegisteredAgent:
     hmac_secret: str = ""
     # Store pending command responses
     pending_responses: Dict[str, asyncio.Future] = field(default_factory=dict)
+    # Store pending stream queues for execute_stream
+    pending_streams: Dict[str, asyncio.Queue] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -245,6 +247,74 @@ class AgentRegistry:
             response["success"] = response.get("type") != "error"
 
         return response
+
+    def handle_stream_message(self, device_id: str, message: dict):
+        """Route a stream_chunk or stream_end message to the appropriate queue."""
+        did = normalize_agent_device_id(device_id)
+        agent = self.get_agent(did)
+        if not agent:
+            return
+
+        request_id = message.get("request_id")
+        if not request_id or request_id not in agent.pending_streams:
+            return
+
+        queue = agent.pending_streams[request_id]
+        msg_type = message.get("type")
+
+        if msg_type == "stream_chunk":
+            queue.put_nowait({"type": "chunk", "data": message.get("data", "")})
+        elif msg_type == "stream_end":
+            queue.put_nowait({
+                "type": "end",
+                "success": message.get("success", False),
+                "stderr": message.get("stderr", ""),
+                "error": message.get("error"),
+                "exit_code": message.get("exit_code", -1),
+            })
+
+    async def stream_command_from_agent(self, device_id: str, command: str, timeout: int = 300):
+        """
+        Send a streaming execute command and yield stdout lines as they arrive.
+
+        Yields dicts: {"type": "chunk", "data": "line..."} or {"type": "end", ...}
+        """
+        did = normalize_agent_device_id(device_id)
+        agent = self.get_agent(did)
+        if not agent:
+            yield {"type": "end", "success": False, "error": "Agent not found", "exit_code": -1, "stderr": ""}
+            return
+
+        if agent.status != "online":
+            yield {"type": "end", "success": False, "error": f"Agent is {agent.status}", "exit_code": -1, "stderr": ""}
+            return
+
+        req_id = str(uuid.uuid4())[:12]
+        queue = asyncio.Queue()
+        agent.pending_streams[req_id] = queue
+
+        try:
+            message = {
+                "type": "execute_stream",
+                "command": command,
+                "timeout": timeout,
+                "request_id": req_id,
+                "session_token": agent.session_token,
+            }
+            await agent.websocket.send_text(json.dumps(message))
+
+            while True:
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=timeout)
+                except asyncio.TimeoutError:
+                    yield {"type": "end", "success": False, "error": f"Stream timeout after {timeout}s", "exit_code": -1, "stderr": ""}
+                    return
+
+                yield item
+                if item.get("type") == "end":
+                    return
+        finally:
+            agent.pending_streams.pop(req_id, None)
 
 
 # Global instance

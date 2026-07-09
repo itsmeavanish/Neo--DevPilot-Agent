@@ -1249,6 +1249,7 @@ export function claudeCodeStream(
   message: string,
   workspaceRoot: string,
   callbacks?: IDEAgentStreamCallbacks,
+  continueSession: boolean = false,
 ): () => void {
   let aborted = false;
 
@@ -1261,6 +1262,7 @@ export function claudeCodeStream(
         message,
         pairing_code: configManager.pairingCode?.trim().toUpperCase() || undefined,
         workspace_root: workspaceRoot || configManager.workspaceRoot || undefined,
+        continue_session: continueSession,
       });
 
       const streamed = await _xhrAgentStream(url, body, headers, callbacks, () => aborted);

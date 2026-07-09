@@ -29,6 +29,7 @@ class ClaudeCodeRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=8000)
     workspace_root: Optional[str] = None
     pairing_code: Optional[str] = None
+    continue_session: bool = Field(default=False, description="If true, resumes the previous Claude Code conversation in this workspace")
 
 
 class JulesRequest(BaseModel):
@@ -100,6 +101,9 @@ async def claude_code_stream(request: ClaudeCodeRequest):
             # Step 3: Build the claude command
             workspace = request.workspace_root or "."
 
+            # Build CLI flags
+            continue_flag = " --continue" if request.continue_session else ""
+
             if is_windows:
                 # Use the agent's native file_write to write a .ps1 script,
                 # then execute it. This bypasses cmd.exe's 8191-char limit entirely.
@@ -110,7 +114,7 @@ async def claude_code_stream(request: ClaudeCodeRequest):
                     f"Set-Location -Path '{workspace_ps}'",
                     f"$bytes = [Convert]::FromBase64String('{prompt_b64}')",
                     "$prompt = [System.Text.Encoding]::UTF8.GetString($bytes)",
-                    "claude -p $prompt --output-format stream-json --verbose",
+                    f"claude -p $prompt --output-format stream-json --verbose{continue_flag}",
                 ])
 
                 # Write script via WebSocket file_write (no cmd.exe involved)
@@ -141,132 +145,103 @@ async def claude_code_stream(request: ClaudeCodeRequest):
                     yield "data: [DONE]\n\n"
                     return
 
-                claude_cmd = f'cd "{workspace}" && claude -p "$(cat {tmp_file})" --output-format stream-json --verbose'
+                claude_cmd = f'cd "{workspace}" && claude -p "$(cat {tmp_file})" --output-format stream-json --verbose{continue_flag}'
 
             yield _sse({"type": "tool_call", "tool": "claude_code", "args": {"workspace": workspace, "prompt_preview": request.message[:100]}})
 
-            # Run Claude Code (5 min timeout — it can take a while for complex tasks)
-            try:
-                raw = await registry.send_command_to_agent(code, claude_cmd, timeout=300)
-            except asyncio.TimeoutError:
-                yield _sse({"type": "error", "content": "Claude Code took too long (>5 min). Try breaking the task into smaller pieces."})
-                yield "data: [DONE]\n\n"
-                if cleanup_cmd:
-                    await registry.send_command_to_agent(code, cleanup_cmd, timeout=5)
-                return
-            except Exception as e:
-                logger.exception("Claude Code execution failed")
-                yield _sse({"type": "error", "content": f"Failed to run Claude Code: {e}"})
-                yield "data: [DONE]\n\n"
-                if cleanup_cmd:
-                    await registry.send_command_to_agent(code, cleanup_cmd, timeout=5)
-                return
+            # Stream Claude Code output line-by-line in real-time
+            full_text = ""
+            last_text = ""
+            stream_error = None
 
-            # Cleanup temp file (fire and forget — only needed on Unix)
+            async for item in registry.stream_command_from_agent(code, claude_cmd, timeout=300):
+                if item["type"] == "chunk":
+                    line = item["data"].strip()
+                    if not line:
+                        continue
+
+                    try:
+                        evt = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
+                    evt_type = evt.get("type", "")
+                    evt_subtype = evt.get("subtype", "")
+
+                    if evt_type == "system":
+                        if evt_subtype == "init":
+                            model = evt.get("model", "claude")
+                            yield _sse({"type": "thinking", "content": f"Claude Code ({model}) initialized in {evt.get('cwd', workspace)}"})
+                        elif evt_subtype == "thinking_tokens":
+                            tokens = evt.get("estimated_tokens", 0)
+                            if tokens > 20:
+                                yield _sse({"type": "thinking", "content": f"Thinking... ({tokens} tokens)"})
+
+                    elif evt_type == "assistant":
+                        msg = evt.get("message", {})
+                        for block in msg.get("content", []):
+                            block_type = block.get("type", "")
+                            if block_type == "thinking":
+                                thinking_text = block.get("thinking", "")
+                                if thinking_text:
+                                    yield _sse({"type": "thinking", "content": thinking_text[:500]})
+                            elif block_type == "text":
+                                text = block.get("text", "")
+                                if text and text != last_text:
+                                    last_text = text
+                                    full_text = text
+                                    yield _sse({"type": "token", "content": text})
+                            elif block_type == "tool_use":
+                                tool_name = block.get("name", "unknown")
+                                tool_input = block.get("input", {})
+                                yield _sse({"type": "tool_call", "tool": tool_name, "args": tool_input})
+                            elif block_type == "tool_result":
+                                content = block.get("content", "")
+                                if isinstance(content, list):
+                                    content = "\n".join(
+                                        c.get("text", "") for c in content if isinstance(c, dict)
+                                    )
+                                yield _sse({"type": "tool_result", "tool": block.get("name", "tool"), "result": {"output": str(content)[:2000], "status": "success"}})
+
+                    elif evt_type == "result":
+                        result_text = evt.get("result", "")
+                        duration = evt.get("duration_ms", 0)
+                        num_turns = evt.get("num_turns", 1)
+                        if result_text and result_text != full_text:
+                            full_text = result_text
+                            yield _sse({"type": "token", "content": result_text})
+                        info_parts = []
+                        if duration:
+                            info_parts.append(f"{duration/1000:.1f}s")
+                        if num_turns and num_turns > 1:
+                            info_parts.append(f"{num_turns} turns")
+                        if info_parts:
+                            yield _sse({"type": "thinking", "content": f"Completed in {' | '.join(info_parts)}"})
+
+                elif item["type"] == "end":
+                    exit_code = item.get("exit_code", -1)
+                    stderr = item.get("stderr", "")
+                    if not item.get("success") and not full_text:
+                        error_msg = item.get("error") or stderr or f"Claude Code exited with code {exit_code}"
+                        if "ANTHROPIC_API_KEY" in error_msg or "api key" in error_msg.lower():
+                            error_msg = "Claude Code needs an API key. Run `claude` on your laptop terminal to authenticate first."
+                        elif "rate limit" in error_msg.lower():
+                            error_msg = "Rate limited by Anthropic. Please wait a moment and try again."
+                        elif "permission" in error_msg.lower() or "trust" in error_msg.lower():
+                            error_msg = "Claude Code needs permissions. Run `claude` interactively on your laptop once to accept the trust prompt, then retry."
+                        stream_error = error_msg
+
+            # Cleanup temp file
             if cleanup_cmd:
                 asyncio.create_task(_cleanup_temp(registry, code, cleanup_cmd))
 
-            stdout = raw.get("stdout", "")
-            stderr = raw.get("stderr", "")
-            exit_code = raw.get("exit_code", -1)
-
-            yield _sse({"type": "tool_result", "tool": "claude_code", "result": {"status": "success" if exit_code == 0 else "error", "exit_code": exit_code}})
-
-            if exit_code != 0 and not stdout:
-                error_msg = stderr or f"Claude Code exited with code {exit_code}"
-                if "ANTHROPIC_API_KEY" in error_msg or "api key" in error_msg.lower():
-                    error_msg = "Claude Code needs an API key. Run `claude` on your laptop terminal to authenticate first."
-                elif "rate limit" in error_msg.lower():
-                    error_msg = "Rate limited by Anthropic. Please wait a moment and try again."
-                elif "permission" in error_msg.lower() or "trust" in error_msg.lower():
-                    error_msg = "Claude Code needs permissions. Run `claude` interactively on your laptop once to accept the trust prompt, then retry."
-                yield _sse({"type": "error", "content": error_msg})
+            if stream_error:
+                yield _sse({"type": "error", "content": stream_error})
                 yield "data: [DONE]\n\n"
                 return
 
-            # Step 5: Parse stream-json output from Claude Code CLI
-            # Actual format (one JSON per line):
-            #   {"type":"system","subtype":"init","tools":[...],...} — skip
-            #   {"type":"system","subtype":"thinking_tokens","estimated_tokens":N,...} — thinking indicator
-            #   {"type":"assistant","message":{"content":[{"type":"thinking","thinking":"..."},{"type":"text","text":"..."},{"type":"tool_use","name":"...","input":{}}]}} — content
-            #   {"type":"result","subtype":"success","result":"final text","duration_ms":N,...} — done
-            full_text = ""
-            last_text = ""
-            lines = stdout.split('\n')
-
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    evt = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-
-                evt_type = evt.get("type", "")
-                evt_subtype = evt.get("subtype", "")
-
-                if evt_type == "system":
-                    if evt_subtype == "init":
-                        model = evt.get("model", "claude")
-                        yield _sse({"type": "thinking", "content": f"Claude Code ({model}) initialized in {evt.get('cwd', workspace)}"})
-                    elif evt_subtype == "thinking_tokens":
-                        tokens = evt.get("estimated_tokens", 0)
-                        if tokens > 20:
-                            yield _sse({"type": "thinking", "content": f"Thinking... ({tokens} tokens)"})
-
-                elif evt_type == "assistant":
-                    msg = evt.get("message", {})
-                    for block in msg.get("content", []):
-                        block_type = block.get("type", "")
-                        if block_type == "thinking":
-                            thinking_text = block.get("thinking", "")
-                            if thinking_text:
-                                yield _sse({"type": "thinking", "content": thinking_text[:500]})
-                        elif block_type == "text":
-                            text = block.get("text", "")
-                            if text and text != last_text:
-                                last_text = text
-                                full_text = text
-                                yield _sse({"type": "token", "content": text})
-                        elif block_type == "tool_use":
-                            tool_name = block.get("name", "unknown")
-                            tool_input = block.get("input", {})
-                            yield _sse({"type": "tool_call", "tool": tool_name, "args": tool_input})
-                        elif block_type == "tool_result":
-                            content = block.get("content", "")
-                            if isinstance(content, list):
-                                content = "\n".join(
-                                    c.get("text", "") for c in content if isinstance(c, dict)
-                                )
-                            yield _sse({"type": "tool_result", "tool": block.get("name", "tool"), "result": {"output": str(content)[:2000], "status": "success"}})
-
-                elif evt_type == "result":
-                    result_text = evt.get("result", "")
-                    duration = evt.get("duration_ms", 0)
-                    num_turns = evt.get("num_turns", 1)
-                    if result_text and result_text != full_text:
-                        full_text = result_text
-                        yield _sse({"type": "token", "content": result_text})
-                    info_parts = []
-                    if duration:
-                        info_parts.append(f"{duration/1000:.1f}s")
-                    if num_turns and num_turns > 1:
-                        info_parts.append(f"{num_turns} turns")
-                    if info_parts:
-                        yield _sse({"type": "thinking", "content": f"Completed in {' | '.join(info_parts)}"})
-
-            # Fallback: if no structured text was parsed, emit raw stdout
-            if not full_text and stdout.strip():
-                full_text = stdout.strip()
-                chunk_size = 120
-                for i in range(0, len(full_text), chunk_size):
-                    chunk = full_text[i:i + chunk_size]
-                    yield _sse({"type": "token", "content": chunk})
-                    await asyncio.sleep(0.01)
-
-            if not full_text and stderr:
-                full_text = f"Claude Code output:\n{stderr[:2000]}"
+            if not full_text:
+                full_text = "Claude Code completed with no output."
                 yield _sse({"type": "token", "content": full_text})
 
             yield _sse({"type": "done", "content": full_text})

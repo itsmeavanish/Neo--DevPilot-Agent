@@ -12,8 +12,6 @@ import {
   ActivityIndicator,
   Alert,
   Modal,
-  Animated,
-  useWindowDimensions,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
@@ -66,12 +64,6 @@ interface TerminalLine {
 }
 
 type AgentType = 'freellm' | 'claude_code' | 'jules';
-type PanelType = 'files' | 'terminal' | 'agent';
-
-// Responsive breakpoints
-const MOBILE_BREAKPOINT = 768;
-const TABLET_BREAKPOINT = 1024;
-const ACTIVITY_BAR_WIDTH = 44;
 
 // Formatted response renderer for Claude Code messages
 function FormattedResponse({ content }: { content: string }) {
@@ -198,12 +190,6 @@ const fmtStyles = StyleSheet.create({
 
 export default function IDEScreen() {
   const params = useLocalSearchParams<{ openPath?: string }>();
-  const { width: windowWidth, height: windowHeight } = useWindowDimensions();
-
-  // Responsive helpers
-  const isMobile = windowWidth < MOBILE_BREAKPOINT;
-  const isTablet = windowWidth >= MOBILE_BREAKPOINT && windowWidth < TABLET_BREAKPOINT;
-  const isDesktop = windowWidth >= TABLET_BREAKPOINT;
 
   // File explorer state
   const [currentPath, setCurrentPath] = useState(params.openPath || '.');
@@ -245,22 +231,17 @@ export default function IDEScreen() {
   const [thinkingSteps, setThinkingSteps] = useState<ChatMessage[]>([]);
   const [showThinkingDetails, setShowThinkingDetails] = useState(true);
 
-  // UI state
-  const [activePanel, setActivePanel] = useState<PanelType | null>(isMobile ? null : 'files');
-  const [showExplorer, setShowExplorer] = useState(!isMobile);
-  const [showTerminalPanel, setShowTerminalPanel] = useState(false);
-  const [showAgentPanel, setShowAgentPanel] = useState(!isMobile);
+  // Drawer state (replaces panel state)
+  const [showFilesDrawer, setShowFilesDrawer] = useState(false);
+  const [showEditorDrawer, setShowEditorDrawer] = useState(false);
+  const [showTerminalDrawer, setShowTerminalDrawer] = useState(false);
   const [showOpenFolderModal, setShowOpenFolderModal] = useState(false);
   const [folderInput, setFolderInput] = useState(currentPath);
-
-  // Animation values
-  const explorerWidth = useRef(new Animated.Value(isMobile ? 0 : 240)).current;
-  const agentPanelHeight = useRef(new Animated.Value(isMobile ? 0 : 350)).current;
-  const terminalPanelHeight = useRef(new Animated.Value(0)).current;
 
   // Refs
   const terminalScrollRef = useRef<ScrollView>(null);
   const chatScrollRef = useRef<ScrollView>(null);
+  const claudeSessionStarted = useRef(false);
 
   // Initialize workspace
   useEffect(() => {
@@ -283,54 +264,37 @@ export default function IDEScreen() {
     init();
   }, [params.openPath]);
 
-  // Toggle panels with animation
-  const toggleExplorer = useCallback(() => {
-    const newState = !showExplorer;
-    setShowExplorer(newState);
-    if (isMobile && newState) {
-      setShowTerminalPanel(false);
-      setShowAgentPanel(false);
-      setActivePanel('files');
-    }
-    Animated.spring(explorerWidth, {
-      toValue: newState ? (isMobile ? windowWidth * 0.75 : 240) : 0,
-      useNativeDriver: false,
-      tension: 80,
-      friction: 12,
-    }).start();
-  }, [showExplorer, isMobile, windowWidth]);
+  // Drawer handlers
+  const openFilesDrawer = useCallback(() => {
+    setShowFilesDrawer(true);
+  }, []);
 
-  const toggleTerminal = useCallback(() => {
-    const newState = !showTerminalPanel;
-    setShowTerminalPanel(newState);
-    if (isMobile && newState) {
-      setShowExplorer(false);
-      setShowAgentPanel(false);
-      setActivePanel('terminal');
-    }
-    Animated.spring(terminalPanelHeight, {
-      toValue: newState ? (isMobile ? windowHeight * 0.5 : 280) : 0,
-      useNativeDriver: false,
-      tension: 80,
-      friction: 12,
-    }).start();
-  }, [showTerminalPanel, isMobile, windowHeight]);
+  const openEditorDrawer = useCallback(() => {
+    setShowEditorDrawer(true);
+  }, []);
 
-  const toggleAgent = useCallback(() => {
-    const newState = !showAgentPanel;
-    setShowAgentPanel(newState);
-    if (isMobile && newState) {
-      setShowExplorer(false);
-      setShowTerminalPanel(false);
-      setActivePanel('agent');
-    }
-    Animated.spring(agentPanelHeight, {
-      toValue: newState ? (isMobile ? windowHeight * 0.6 : 400) : 0,
-      useNativeDriver: false,
-      tension: 80,
-      friction: 12,
-    }).start();
-  }, [showAgentPanel, isMobile, windowHeight]);
+  const openTerminalDrawer = useCallback(() => {
+    setShowTerminalDrawer(true);
+  }, []);
+
+  const closeFilesDrawer = useCallback(() => {
+    setShowFilesDrawer(false);
+  }, []);
+
+  const closeEditorDrawer = useCallback(() => {
+    setShowEditorDrawer(false);
+  }, []);
+
+  const closeTerminalDrawer = useCallback(() => {
+    setShowTerminalDrawer(false);
+  }, []);
+
+  // Start a new chat session (resets context)
+  const startNewSession = useCallback(() => {
+    setChatMessages([]);
+    setThinkingSteps([]);
+    claudeSessionStarted.current = false;
+  }, []);
 
   // Load directory
   const loadDirectory = useCallback(async (path: string) => {
@@ -370,10 +334,7 @@ export default function IDEScreen() {
     const existing = openTabs.find(t => t.path === file.path);
     if (existing) {
       setActiveTab(file.path);
-      if (isMobile) {
-        setShowExplorer(false);
-        Animated.spring(explorerWidth, { toValue: 0, useNativeDriver: false, tension: 80, friction: 12 }).start();
-      }
+      closeFilesDrawer();
       return;
     }
 
@@ -395,16 +356,13 @@ export default function IDEScreen() {
 
       setOpenTabs(prev => [...prev, newTab]);
       setActiveTab(file.path);
-      if (isMobile) {
-        setShowExplorer(false);
-        Animated.spring(explorerWidth, { toValue: 0, useNativeDriver: false, tension: 80, friction: 12 }).start();
-      }
+      closeFilesDrawer();
     } catch (err) {
       Alert.alert('Error', err instanceof Error ? err.message : 'Failed to open file');
     } finally {
       setLoadingContent(false);
     }
-  }, [openTabs, isMobile, loadDirectory]);
+  }, [openTabs, closeFilesDrawer, loadDirectory]);
 
   // Close tab
   const closeTab = useCallback((path: string) => {
@@ -491,6 +449,75 @@ export default function IDEScreen() {
     }
   }, [terminalCommand, runningCommand]);
 
+  // Handle "open folder X in VS Code" intent
+  const handleOpenFolderIntent = useCallback(async (input: string): Promise<boolean> => {
+    const match = input.match(/open\s+(?:folder\s+|project\s+)?(.+?)\s+(?:in\s+)?(?:vs\s*code|vscode)/i)
+      || input.match(/open\s+(.+?)\s+(?:folder|project)\s+(?:in\s+)?(?:vs\s*code|vscode)/i)
+      || input.match(/(?:vs\s*code|vscode)\s+(?:open|me)\s+(.+)/i);
+    if (!match) return false;
+
+    const folderName = match[1].trim().replace(/['"]/g, '');
+    if (!folderName) return false;
+
+    setChatMessages(prev => [...prev, {
+      id: uid('system'),
+      role: 'system',
+      content: `Searching for "${folderName}" on your laptop...`,
+    }]);
+
+    try {
+      let folderPath = '';
+
+      // Strategy: check common parent directories directly (fast, no recursion)
+      const checkCmd = `if exist "%USERPROFILE%\\Desktop\\${folderName}" (echo %USERPROFILE%\\Desktop\\${folderName}) else if exist "%USERPROFILE%\\Documents\\${folderName}" (echo %USERPROFILE%\\Documents\\${folderName}) else if exist "%USERPROFILE%\\Projects\\${folderName}" (echo %USERPROFILE%\\Projects\\${folderName}) else if exist "%USERPROFILE%\\source\\repos\\${folderName}" (echo %USERPROFILE%\\source\\repos\\${folderName}) else if exist "%USERPROFILE%\\${folderName}" (echo %USERPROFILE%\\${folderName}) else (echo __NOT_FOUND__)`;
+      const checkResult = await runSystemCommand(checkCmd);
+
+      if (checkResult.stdout?.trim() && !checkResult.stdout.includes('__NOT_FOUND__')) {
+        folderPath = checkResult.stdout.trim().split('\n')[0].trim();
+      }
+
+      // Fallback: shallow search in Desktop and Documents (depth 1 only — fast)
+      if (!folderPath) {
+        const fallbackCmd = `dir /b /ad "%USERPROFILE%\\Desktop\\${folderName}" 2>nul && echo %USERPROFILE%\\Desktop\\${folderName}`;
+        const fallback = await runSystemCommand(fallbackCmd);
+        if (fallback.stdout?.trim() && fallback.exit_code === 0) {
+          const lines = fallback.stdout.trim().split('\n');
+          const pathLine = lines.find(l => l.includes('\\'));
+          if (pathLine) folderPath = pathLine.trim();
+        }
+      }
+
+      if (!folderPath) {
+        setChatMessages(prev => [...prev, {
+          id: uid('err'),
+          role: 'assistant',
+          content: `Could not find folder "${folderName}" on your laptop. Try providing the full path like: open folder C:\\Users\\...\\${folderName} in VS Code`,
+          isError: true,
+        }]);
+        return true;
+      }
+
+      await runSystemCommand(`code "${folderPath}"`);
+
+      await loadDirectory(folderPath);
+
+      setChatMessages(prev => [...prev, {
+        id: uid('opened'),
+        role: 'assistant',
+        content: `Opened "${folderName}" in VS Code and set IDE workspace.\n\nPath: ${folderPath}`,
+      }]);
+
+    } catch (err) {
+      setChatMessages(prev => [...prev, {
+        id: uid('err'),
+        role: 'assistant',
+        content: `Failed to open folder: ${err instanceof Error ? err.message : 'Unknown error'}`,
+        isError: true,
+      }]);
+    }
+    return true;
+  }, [loadDirectory]);
+
   // Send agent message
   const sendCopilotMessage = useCallback(async () => {
     if (!chatInput.trim() || loadingChat) return;
@@ -507,6 +534,14 @@ export default function IDEScreen() {
     setThinkingSteps([]);
 
     try {
+      // Check for "open folder X in VS Code" intent
+      const handled = await handleOpenFolderIntent(currentInput);
+      if (handled) {
+        setLoadingChat(false);
+        setTimeout(() => chatScrollRef.current?.scrollToEnd({ animated: true }), 100);
+        return;
+      }
+
       let contextMessage = currentInput;
       if (activeTab) {
         const activeFileData = openTabs.find(t => t.path === activeTab);
@@ -686,7 +721,9 @@ export default function IDEScreen() {
 
       let abort: () => void;
       if (selectedAgent === 'claude_code') {
-        abort = claudeCodeStream(contextMessage, currentPath, agentCallbacks);
+        const shouldContinue = claudeSessionStarted.current;
+        abort = claudeCodeStream(contextMessage, currentPath, agentCallbacks, shouldContinue);
+        claudeSessionStarted.current = true;
       } else {
         abort = ideAgentStream(contextMessage, currentPath, agentCallbacks, { sessionId: agentSessionId });
       }
@@ -753,97 +790,242 @@ export default function IDEScreen() {
   };
 
   const activeFile = openTabs.find(t => t.path === activeTab);
-  const folderName = currentPath.split(/[/\\]/).filter(Boolean).pop() || 'Root';
+  const folderName = currentPath.split(/[/\\]/).filter(Boolean).pop() || 'No folder open';
 
   return (
     <KeyboardAvoidingView
       style={styles.container}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
-      {/* Activity Bar */}
-      <View style={styles.activityBar}>
+      {/* Top Header */}
+      <View style={styles.header}>
         <TouchableOpacity
-          style={[styles.activityIcon, activePanel === 'files' && styles.activityIconActive]}
-          onPress={() => {
-            if (activePanel === 'files' && showExplorer) {
-              toggleExplorer();
-              setActivePanel(null);
-            } else {
-              setActivePanel('files');
-              if (!showExplorer) toggleExplorer();
-              if (isMobile) {
-                setShowTerminalPanel(false);
-                setShowAgentPanel(false);
-              }
-            }
-          }}
+          style={styles.agentSelector}
+          onPress={() => setShowAgentPicker(!showAgentPicker)}
         >
-          <Ionicons name="documents-outline" size={22} color={activePanel === 'files' ? Colors.primary : Colors.muted} />
+          <Text style={styles.agentSelectorText}>{getAgentLabel()}</Text>
+          <Ionicons name={showAgentPicker ? 'chevron-up' : 'chevron-down'} size={10} color={Colors.primary} />
         </TouchableOpacity>
 
-        <TouchableOpacity
-          style={[styles.activityIcon, activePanel === 'terminal' && styles.activityIconActive]}
-          onPress={() => {
-            if (activePanel === 'terminal' && showTerminalPanel) {
-              toggleTerminal();
-              setActivePanel(null);
-            } else {
-              setActivePanel('terminal');
-              if (!showTerminalPanel) toggleTerminal();
-              if (isMobile) {
-                setShowExplorer(false);
-                setShowAgentPanel(false);
-              }
-            }
-          }}
-        >
-          <Ionicons name="terminal-outline" size={22} color={activePanel === 'terminal' ? Colors.primary : Colors.muted} />
-        </TouchableOpacity>
+        {loadingChat && (
+          <TouchableOpacity style={styles.stopButton} onPress={stopAgent}>
+            <Ionicons name="stop-circle" size={20} color={Colors.red} />
+          </TouchableOpacity>
+        )}
 
-        <TouchableOpacity
-          style={[styles.activityIcon, activePanel === 'agent' && styles.activityIconActive]}
-          onPress={() => {
-            if (activePanel === 'agent' && showAgentPanel) {
-              toggleAgent();
-              setActivePanel(null);
-            } else {
-              setActivePanel('agent');
-              if (!showAgentPanel) toggleAgent();
-              if (isMobile) {
-                setShowExplorer(false);
-                setShowTerminalPanel(false);
-              }
-            }
-          }}
-        >
-          <Ionicons name="sparkles-outline" size={22} color={activePanel === 'agent' ? Colors.primary : Colors.muted} />
+        <TouchableOpacity style={styles.headerIcon} onPress={startNewSession}>
+          <Ionicons name="add-circle-outline" size={20} color={Colors.primary} />
         </TouchableOpacity>
 
         <View style={{ flex: 1 }} />
 
-        <TouchableOpacity style={styles.activityIcon} onPress={() => setShowOpenFolderModal(true)}>
-          <Ionicons name="folder-open-outline" size={22} color={Colors.muted} />
+        <TouchableOpacity style={styles.headerIcon} onPress={openFilesDrawer}>
+          <Ionicons name="documents-outline" size={20} color={Colors.foreground} />
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.headerIcon} onPress={openEditorDrawer}>
+          <Ionicons name="code-slash-outline" size={20} color={Colors.foreground} />
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.headerIcon} onPress={openTerminalDrawer}>
+          <Ionicons name="terminal-outline" size={20} color={Colors.foreground} />
         </TouchableOpacity>
       </View>
 
-      {/* Explorer Panel */}
-      {showExplorer && (
-        <Animated.View style={[
-          styles.explorerPanel,
-          isMobile && styles.explorerPanelMobile,
-          { width: isMobile ? explorerWidth : 240 },
-        ]}>
-          <View style={styles.panelHeader}>
-            <Text style={styles.panelTitle}>EXPLORER</Text>
-            <View style={{ flexDirection: 'row', gap: Spacing.sm }}>
-              <TouchableOpacity onPress={() => loadDirectory(currentPath)}>
-                <Ionicons name="refresh" size={16} color={Colors.muted} />
+      {/* Agent Picker Dropdown */}
+      {showAgentPicker && (
+        <View style={styles.agentPickerMenu}>
+          <TouchableOpacity
+            style={[styles.agentPickerItem, selectedAgent === 'freellm' && styles.agentPickerItemActive]}
+            onPress={() => { setSelectedAgent('freellm'); setShowAgentPicker(false); }}
+          >
+            <Ionicons name="infinite" size={18} color={selectedAgent === 'freellm' ? Colors.primary : Colors.foreground} />
+            <View style={{ flex: 1, marginLeft: Spacing.md }}>
+              <Text style={[styles.agentPickerName, selectedAgent === 'freellm' && styles.agentPickerNameActive]}>FreeLLM</Text>
+              <Text style={styles.agentPickerDesc}>Free AI agent with full workspace access</Text>
+            </View>
+            {selectedAgent === 'freellm' && <Ionicons name="checkmark-circle" size={18} color={Colors.primary} />}
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.agentPickerItem, selectedAgent === 'claude_code' && styles.agentPickerItemActive]}
+            onPress={() => { setSelectedAgent('claude_code'); setShowAgentPicker(false); }}
+          >
+            <Ionicons name="terminal" size={18} color={selectedAgent === 'claude_code' ? Colors.primary : Colors.foreground} />
+            <View style={{ flex: 1, marginLeft: Spacing.md }}>
+              <Text style={[styles.agentPickerName, selectedAgent === 'claude_code' && styles.agentPickerNameActive]}>Claude Code</Text>
+              <Text style={styles.agentPickerDesc}>Anthropic's CLI agent on your laptop</Text>
+            </View>
+            {selectedAgent === 'claude_code' && <Ionicons name="checkmark-circle" size={18} color={Colors.primary} />}
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.agentPickerItem, selectedAgent === 'jules' && styles.agentPickerItemActive]}
+            onPress={() => { setSelectedAgent('jules'); setShowAgentPicker(false); }}
+          >
+            <Ionicons name="git-branch" size={18} color={selectedAgent === 'jules' ? Colors.primary : Colors.foreground} />
+            <View style={{ flex: 1, marginLeft: Spacing.md }}>
+              <Text style={[styles.agentPickerName, selectedAgent === 'jules' && styles.agentPickerNameActive]}>Jules</Text>
+              <Text style={styles.agentPickerDesc}>GitHub's async coding agent via issues</Text>
+            </View>
+            {selectedAgent === 'jules' && <Ionicons name="checkmark-circle" size={18} color={Colors.primary} />}
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {/* Chat Messages (Main Content) */}
+      <ScrollView
+        ref={chatScrollRef}
+        style={styles.chatMessages}
+        contentContainerStyle={styles.chatMessagesContent}
+        onContentSizeChange={() => chatScrollRef.current?.scrollToEnd({ animated: true })}
+      >
+        {chatMessages.map(msg => {
+          if (msg.role === 'assistant' && !msg.isError && msg.content.length > 120) {
+            const isExpanded = msg.expanded ?? false;
+            const preview = msg.content.slice(0, 100).replace(/\n/g, ' ') + '...';
+            return (
+              <TouchableOpacity
+                key={msg.id}
+                activeOpacity={0.8}
+                onPress={() => {
+                  setChatMessages(prev => prev.map(m =>
+                    m.id === msg.id ? { ...m, expanded: !m.expanded } : m
+                  ));
+                }}
+                style={[styles.chatMessage, styles.chatMessageAssistant]}
+              >
+                {!isExpanded ? (
+                  <View style={styles.collapsedResponse}>
+                    <View style={styles.collapsedHeader}>
+                      <Ionicons name="sparkles" size={14} color={Colors.primary} />
+                      <Text style={styles.collapsedLabel}>Claude Code</Text>
+                      <Ionicons name="chevron-down" size={14} color={Colors.muted} />
+                    </View>
+                    <Text style={styles.collapsedPreview} numberOfLines={2}>{preview}</Text>
+                  </View>
+                ) : (
+                  <View style={styles.expandedResponse}>
+                    <View style={styles.expandedHeader}>
+                      <Ionicons name="sparkles" size={14} color={Colors.primary} />
+                      <Text style={styles.collapsedLabel}>Claude Code</Text>
+                      <Ionicons name="chevron-up" size={14} color={Colors.muted} />
+                    </View>
+                    <FormattedResponse content={msg.content} />
+                  </View>
+                )}
               </TouchableOpacity>
-              {isMobile && (
-                <TouchableOpacity onPress={toggleExplorer}>
-                  <Ionicons name="close" size={16} color={Colors.muted} />
-                </TouchableOpacity>
-              )}
+            );
+          }
+          return (
+            <View key={msg.id} style={[
+              styles.chatMessage,
+              msg.role === 'user' && styles.chatMessageUser,
+              msg.role === 'assistant' && styles.chatMessageAssistant,
+              msg.role === 'system' && styles.chatMessageSystem,
+            ]}>
+              <Text style={[styles.chatMessageText, msg.isError && styles.chatMessageError]}>
+                {msg.content}
+              </Text>
+            </View>
+          );
+        })}
+
+        {/* Thinking steps */}
+        {thinkingSteps.length > 0 && (
+          <View style={styles.thinkingContainer}>
+            <TouchableOpacity
+              style={styles.thinkingHeader}
+              onPress={() => setShowThinkingDetails(!showThinkingDetails)}
+            >
+              <View style={styles.thinkingPulse}>
+                <ActivityIndicator size="small" color={Colors.primary} />
+              </View>
+              <Text style={styles.thinkingHeaderText}>{loadingChat ? 'Processing...' : `${thinkingSteps.length} steps`}</Text>
+              <Ionicons name={showThinkingDetails ? 'chevron-up' : 'chevron-down'} size={16} color={Colors.primary} />
+            </TouchableOpacity>
+
+            {showThinkingDetails && thinkingSteps.map(step => {
+              if (step.isThinking) {
+                return (
+                  <View key={step.id} style={styles.thinkingStep}>
+                    <Ionicons name="bulb-outline" size={12} color={Colors.yellow} />
+                    <Text style={styles.thinkingStepText}>{step.content}</Text>
+                  </View>
+                );
+              }
+              if (step.isToolCall) {
+                return (
+                  <View key={step.id} style={styles.toolCallCard}>
+                    <View style={styles.toolCallHeader}>
+                      <Ionicons name="construct-outline" size={14} color={Colors.cyan} />
+                      <Text style={styles.toolCallName}>{step.toolName}</Text>
+                      {step.toolResult && (
+                        <View style={styles.toolCallStatus}>
+                          <Ionicons
+                            name={step.toolResult.status === 'success' ? 'checkmark-circle' : 'close-circle'}
+                            size={12}
+                            color={step.toolResult.status === 'success' ? Colors.green : Colors.red}
+                          />
+                          {step.durationMs && (
+                            <Text style={styles.toolCallDuration}>{step.durationMs}ms</Text>
+                          )}
+                        </View>
+                      )}
+                    </View>
+                    {step.toolArgs && Object.keys(step.toolArgs).length > 0 && (
+                      <Text style={styles.toolCallArgs} numberOfLines={2}>
+                        {Object.entries(step.toolArgs)
+                          .map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`)
+                          .join(', ')}
+                      </Text>
+                    )}
+                  </View>
+                );
+              }
+              return null;
+            })}
+          </View>
+        )}
+      </ScrollView>
+
+      {/* Chat Input */}
+      <View style={styles.chatInputContainer}>
+        <TextInput
+          style={styles.chatInput}
+          value={chatInput}
+          onChangeText={setChatInput}
+          placeholder="Ask me anything about this codebase..."
+          placeholderTextColor={Colors.mutedDark}
+          multiline
+          maxLength={2000}
+          editable={!loadingChat}
+        />
+        <TouchableOpacity
+          style={[styles.chatSendButton, (!chatInput.trim() || loadingChat) && styles.chatSendButtonDisabled]}
+          onPress={sendCopilotMessage}
+          disabled={!chatInput.trim() || loadingChat}
+        >
+          <Ionicons name="send" size={18} color={Colors.foreground} />
+        </TouchableOpacity>
+      </View>
+
+
+      {/* Files Drawer Modal */}
+      <Modal visible={showFilesDrawer} animationType="slide" transparent>
+        <TouchableOpacity style={styles.drawerBackdrop} activeOpacity={1} onPress={closeFilesDrawer} />
+        <View style={styles.drawerContainer}>
+          <View style={styles.drawerHandle} />
+          <View style={styles.drawerHeader}>
+            <Text style={styles.drawerTitle}>EXPLORER</Text>
+            <View style={{ flexDirection: 'row', gap: Spacing.md }}>
+              <TouchableOpacity onPress={() => setShowOpenFolderModal(true)}>
+                <Ionicons name="folder-open-outline" size={18} color={Colors.primary} />
+              </TouchableOpacity>
+              <TouchableOpacity onPress={() => loadDirectory(currentPath)}>
+                <Ionicons name="refresh" size={18} color={Colors.muted} />
+              </TouchableOpacity>
+              <TouchableOpacity onPress={closeFilesDrawer}>
+                <Ionicons name="close" size={20} color={Colors.muted} />
+              </TouchableOpacity>
             </View>
           </View>
 
@@ -876,106 +1058,95 @@ export default function IDEScreen() {
               )}
             />
           )}
-        </Animated.View>
-      )}
-
-      {/* Mobile overlay */}
-      {isMobile && (showExplorer || showTerminalPanel || showAgentPanel) && (
-        <TouchableOpacity
-          style={styles.overlay}
-          activeOpacity={1}
-          onPress={() => {
-            if (showExplorer) toggleExplorer();
-            if (showTerminalPanel) toggleTerminal();
-            if (showAgentPanel) toggleAgent();
-            setActivePanel(null);
-          }}
-        />
-      )}
-
-      {/* Main Editor Area */}
-      <View style={styles.mainArea}>
-        {/* Tab Bar */}
-        <View style={styles.tabBar}>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ flex: 1 }}>
-            {openTabs.map(tab => (
-              <View key={tab.path} style={[styles.tab, activeTab === tab.path && styles.tabActive]}>
-                <TouchableOpacity
-                  style={styles.tabButton}
-                  onPress={() => setActiveTab(tab.path)}
-                >
-                  <Text style={[styles.tabText, activeTab === tab.path && styles.tabTextActive]} numberOfLines={1}>
-                    {tab.modified && <Text style={styles.modifiedDot}>● </Text>}
-                    {tab.name}
-                  </Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.tabClose} onPress={() => closeTab(tab.path)}>
-                  <Ionicons name="close" size={14} color={Colors.muted} />
-                </TouchableOpacity>
-              </View>
-            ))}
-          </ScrollView>
-          {activeTab && (
-            <TouchableOpacity style={styles.saveButton} onPress={() => saveFile(activeTab)}>
-              <Ionicons name="save-outline" size={18} color={Colors.primary} />
-              <Text style={styles.saveButtonText}>Save</Text>
-            </TouchableOpacity>
-          )}
         </View>
+      </Modal>
 
-        {/* Editor */}
-        <View style={styles.editorContainer}>
-          {activeFile ? (
-            <ScrollView style={styles.editor}>
-              <View style={styles.codeWrapper}>
-                <View style={styles.lineNumbers}>
-                  {activeFile.content.split('\n').map((_, idx) => (
-                    <Text key={idx} style={styles.lineNumber}>{idx + 1}</Text>
-                  ))}
+      {/* Editor Drawer Modal */}
+      <Modal visible={showEditorDrawer} animationType="slide" transparent>
+        <TouchableOpacity style={styles.drawerBackdrop} activeOpacity={1} onPress={closeEditorDrawer} />
+        <View style={styles.drawerContainer}>
+          <View style={styles.drawerHandle} />
+          <View style={styles.drawerHeader}>
+            <Text style={styles.drawerTitle}>EDITOR</Text>
+            <TouchableOpacity onPress={closeEditorDrawer}>
+              <Ionicons name="close" size={20} color={Colors.muted} />
+            </TouchableOpacity>
+          </View>
+
+          {/* Tab Bar */}
+          <View style={styles.tabBar}>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ flex: 1 }}>
+              {openTabs.map(tab => (
+                <View key={tab.path} style={[styles.tab, activeTab === tab.path && styles.tabActive]}>
+                  <TouchableOpacity
+                    style={styles.tabButton}
+                    onPress={() => setActiveTab(tab.path)}
+                  >
+                    <Text style={[styles.tabText, activeTab === tab.path && styles.tabTextActive]} numberOfLines={1}>
+                      {tab.modified && <Text style={styles.modifiedDot}>● </Text>}
+                      {tab.name}
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.tabClose} onPress={() => closeTab(tab.path)}>
+                    <Ionicons name="close" size={14} color={Colors.muted} />
+                  </TouchableOpacity>
                 </View>
-                <TextInput
-                  style={styles.codeInput}
-                  value={activeFile.content}
-                  onChangeText={(text) => updateContent(activeFile.path, text)}
-                  multiline
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  spellCheck={false}
-                  scrollEnabled={false}
-                />
-              </View>
+              ))}
             </ScrollView>
-          ) : (
-            <View style={styles.emptyEditor}>
-              <Ionicons name="code-slash-outline" size={64} color={Colors.mutedDark} />
-              <Text style={styles.emptyText}>Open a file to start editing</Text>
-              <TouchableOpacity style={styles.primaryButton} onPress={() => setShowOpenFolderModal(true)}>
-                <Text style={styles.primaryButtonText}>Open Folder</Text>
-              </TouchableOpacity>
-            </View>
-          )}
-        </View>
-      </View>
-
-      {/* Terminal Panel */}
-      {showTerminalPanel && (
-        <Animated.View style={[
-          styles.terminalPanel,
-          isMobile && styles.terminalPanelMobile,
-          { height: isMobile ? terminalPanelHeight : 280 },
-        ]}>
-          <View style={styles.panelHeader}>
-            <Ionicons name="terminal" size={14} color={Colors.green} style={{ marginRight: Spacing.xs }} />
-            <Text style={styles.panelTitle}>TERMINAL</Text>
-            <View style={{ flex: 1 }} />
-            <TouchableOpacity onPress={() => setTerminalLines([{ id: '0', type: 'output', content: 'Terminal cleared' }])}>
-              <Ionicons name="trash-outline" size={14} color={Colors.muted} />
-            </TouchableOpacity>
-            {isMobile && (
-              <TouchableOpacity onPress={toggleTerminal} style={{ marginLeft: Spacing.sm }}>
-                <Ionicons name="close" size={16} color={Colors.muted} />
+            {activeTab && (
+              <TouchableOpacity style={styles.saveButton} onPress={() => saveFile(activeTab)}>
+                <Ionicons name="save-outline" size={18} color={Colors.primary} />
               </TouchableOpacity>
             )}
+          </View>
+
+          {/* Editor */}
+          <View style={styles.editorContainer}>
+            {activeFile ? (
+              <ScrollView style={styles.editor}>
+                <View style={styles.codeWrapper}>
+                  <View style={styles.lineNumbers}>
+                    {activeFile.content.split('\n').map((_, idx) => (
+                      <Text key={idx} style={styles.lineNumber}>{idx + 1}</Text>
+                    ))}
+                  </View>
+                  <TextInput
+                    style={styles.codeInput}
+                    value={activeFile.content}
+                    onChangeText={(text) => updateContent(activeFile.path, text)}
+                    multiline
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    spellCheck={false}
+                    scrollEnabled={false}
+                  />
+                </View>
+              </ScrollView>
+            ) : (
+              <View style={styles.emptyEditor}>
+                <Ionicons name="code-slash-outline" size={64} color={Colors.mutedDark} />
+                <Text style={styles.emptyText}>No file open</Text>
+              </View>
+            )}
+          </View>
+        </View>
+      </Modal>
+
+      {/* Terminal Drawer Modal */}
+      <Modal visible={showTerminalDrawer} animationType="slide" transparent>
+        <TouchableOpacity style={styles.drawerBackdrop} activeOpacity={1} onPress={closeTerminalDrawer} />
+        <View style={styles.drawerContainer}>
+          <View style={styles.drawerHandle} />
+          <View style={styles.drawerHeader}>
+            <Ionicons name="terminal" size={16} color={Colors.green} style={{ marginRight: Spacing.xs }} />
+            <Text style={styles.drawerTitle}>TERMINAL</Text>
+            <View style={{ flex: 1 }} />
+            <TouchableOpacity onPress={() => setTerminalLines([{ id: '0', type: 'output', content: 'Terminal cleared' }])}>
+              <Ionicons name="trash-outline" size={16} color={Colors.muted} />
+            </TouchableOpacity>
+            <TouchableOpacity onPress={closeTerminalDrawer} style={{ marginLeft: Spacing.md }}>
+              <Ionicons name="close" size={20} color={Colors.muted} />
+            </TouchableOpacity>
           </View>
 
           <ScrollView
@@ -1016,217 +1187,8 @@ export default function IDEScreen() {
               )}
             </TouchableOpacity>
           </View>
-        </Animated.View>
-      )}
-
-      {/* Agent Panel */}
-      {showAgentPanel && (
-        <Animated.View style={[
-          styles.agentPanel,
-          isMobile && styles.agentPanelMobile,
-          { height: isMobile ? agentPanelHeight : 400 },
-        ]}>
-          <View style={styles.panelHeader}>
-            <Ionicons name="sparkles" size={14} color={Colors.primary} style={{ marginRight: Spacing.xs }} />
-            <Text style={styles.panelTitle}>AI AGENT</Text>
-
-            <TouchableOpacity
-              style={styles.agentSelector}
-              onPress={() => setShowAgentPicker(!showAgentPicker)}
-            >
-              <Text style={styles.agentSelectorText}>{getAgentLabel()}</Text>
-              <Ionicons name={showAgentPicker ? 'chevron-up' : 'chevron-down'} size={10} color={Colors.primary} />
-            </TouchableOpacity>
-
-            {loadingChat && (
-              <TouchableOpacity style={styles.stopButton} onPress={stopAgent}>
-                <Ionicons name="stop-circle" size={16} color={Colors.red} />
-              </TouchableOpacity>
-            )}
-
-            <View style={{ flex: 1 }} />
-            {isMobile && (
-              <TouchableOpacity onPress={toggleAgent}>
-                <Ionicons name="close" size={16} color={Colors.muted} />
-              </TouchableOpacity>
-            )}
-          </View>
-
-          {showAgentPicker && (
-            <View style={styles.agentPickerMenu}>
-              <TouchableOpacity
-                style={[styles.agentPickerItem, selectedAgent === 'freellm' && styles.agentPickerItemActive]}
-                onPress={() => { setSelectedAgent('freellm'); setShowAgentPicker(false); }}
-              >
-                <Ionicons name="infinite" size={18} color={selectedAgent === 'freellm' ? Colors.primary : Colors.foreground} />
-                <View style={{ flex: 1, marginLeft: Spacing.md }}>
-                  <Text style={[styles.agentPickerName, selectedAgent === 'freellm' && styles.agentPickerNameActive]}>FreeLLM</Text>
-                  <Text style={styles.agentPickerDesc}>Free AI agent with full workspace access</Text>
-                </View>
-                {selectedAgent === 'freellm' && <Ionicons name="checkmark-circle" size={18} color={Colors.primary} />}
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={[styles.agentPickerItem, selectedAgent === 'claude_code' && styles.agentPickerItemActive]}
-                onPress={() => { setSelectedAgent('claude_code'); setShowAgentPicker(false); }}
-              >
-                <Ionicons name="terminal" size={18} color={selectedAgent === 'claude_code' ? Colors.primary : Colors.foreground} />
-                <View style={{ flex: 1, marginLeft: Spacing.md }}>
-                  <Text style={[styles.agentPickerName, selectedAgent === 'claude_code' && styles.agentPickerNameActive]}>Claude Code</Text>
-                  <Text style={styles.agentPickerDesc}>Anthropic's CLI agent on your laptop</Text>
-                </View>
-                {selectedAgent === 'claude_code' && <Ionicons name="checkmark-circle" size={18} color={Colors.primary} />}
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={[styles.agentPickerItem, selectedAgent === 'jules' && styles.agentPickerItemActive]}
-                onPress={() => { setSelectedAgent('jules'); setShowAgentPicker(false); }}
-              >
-                <Ionicons name="git-branch" size={18} color={selectedAgent === 'jules' ? Colors.primary : Colors.foreground} />
-                <View style={{ flex: 1, marginLeft: Spacing.md }}>
-                  <Text style={[styles.agentPickerName, selectedAgent === 'jules' && styles.agentPickerNameActive]}>Jules</Text>
-                  <Text style={styles.agentPickerDesc}>GitHub's async coding agent via issues</Text>
-                </View>
-                {selectedAgent === 'jules' && <Ionicons name="checkmark-circle" size={18} color={Colors.primary} />}
-              </TouchableOpacity>
-            </View>
-          )}
-
-          <ScrollView
-            ref={chatScrollRef}
-            style={styles.chatMessages}
-            onContentSizeChange={() => chatScrollRef.current?.scrollToEnd({ animated: true })}
-          >
-            {chatMessages.map(msg => {
-              if (msg.role === 'assistant' && !msg.isError && msg.content.length > 120) {
-                const isExpanded = msg.expanded ?? false;
-                const preview = msg.content.slice(0, 100).replace(/\n/g, ' ') + '...';
-                return (
-                  <TouchableOpacity
-                    key={msg.id}
-                    activeOpacity={0.8}
-                    onPress={() => {
-                      setChatMessages(prev => prev.map(m =>
-                        m.id === msg.id ? { ...m, expanded: !m.expanded } : m
-                      ));
-                    }}
-                    style={[styles.chatMessage, styles.chatMessageAssistant]}
-                  >
-                    {!isExpanded ? (
-                      <View style={styles.collapsedResponse}>
-                        <View style={styles.collapsedHeader}>
-                          <Ionicons name="sparkles" size={14} color={Colors.primary} />
-                          <Text style={styles.collapsedLabel}>Claude Code</Text>
-                          <Ionicons name="chevron-down" size={14} color={Colors.muted} />
-                        </View>
-                        <Text style={styles.collapsedPreview} numberOfLines={2}>{preview}</Text>
-                      </View>
-                    ) : (
-                      <View style={styles.expandedResponse}>
-                        <View style={styles.expandedHeader}>
-                          <Ionicons name="sparkles" size={14} color={Colors.primary} />
-                          <Text style={styles.collapsedLabel}>Claude Code</Text>
-                          <Ionicons name="chevron-up" size={14} color={Colors.muted} />
-                        </View>
-                        <FormattedResponse content={msg.content} />
-                      </View>
-                    )}
-                  </TouchableOpacity>
-                );
-              }
-              return (
-                <View key={msg.id} style={[
-                  styles.chatMessage,
-                  msg.role === 'user' && styles.chatMessageUser,
-                  msg.role === 'assistant' && styles.chatMessageAssistant,
-                  msg.role === 'system' && styles.chatMessageSystem,
-                ]}>
-                  <Text style={[styles.chatMessageText, msg.isError && styles.chatMessageError]}>
-                    {msg.content}
-                  </Text>
-                </View>
-              );
-            })}
-
-            {/* Thinking steps */}
-            {thinkingSteps.length > 0 && (
-              <View style={styles.thinkingContainer}>
-                <TouchableOpacity
-                  style={styles.thinkingHeader}
-                  onPress={() => setShowThinkingDetails(!showThinkingDetails)}
-                >
-                  <View style={styles.thinkingPulse}>
-                    <ActivityIndicator size="small" color={Colors.primary} />
-                  </View>
-                  <Text style={styles.thinkingHeaderText}>{loadingChat ? 'Processing...' : `${thinkingSteps.length} steps`}</Text>
-                  <Ionicons name={showThinkingDetails ? 'chevron-up' : 'chevron-down'} size={16} color={Colors.primary} />
-                </TouchableOpacity>
-
-                {showThinkingDetails && thinkingSteps.map(step => {
-                  if (step.isThinking) {
-                    return (
-                      <View key={step.id} style={styles.thinkingStep}>
-                        <Ionicons name="bulb-outline" size={12} color={Colors.yellow} />
-                        <Text style={styles.thinkingStepText}>{step.content}</Text>
-                      </View>
-                    );
-                  }
-                  if (step.isToolCall) {
-                    return (
-                      <View key={step.id} style={styles.toolCallCard}>
-                        <View style={styles.toolCallHeader}>
-                          <Ionicons name="construct-outline" size={14} color={Colors.cyan} />
-                          <Text style={styles.toolCallName}>{step.toolName}</Text>
-                          {step.toolResult && (
-                            <View style={styles.toolCallStatus}>
-                              <Ionicons
-                                name={step.toolResult.status === 'success' ? 'checkmark-circle' : 'close-circle'}
-                                size={12}
-                                color={step.toolResult.status === 'success' ? Colors.green : Colors.red}
-                              />
-                              {step.durationMs && (
-                                <Text style={styles.toolCallDuration}>{step.durationMs}ms</Text>
-                              )}
-                            </View>
-                          )}
-                        </View>
-                        {step.toolArgs && Object.keys(step.toolArgs).length > 0 && (
-                          <Text style={styles.toolCallArgs} numberOfLines={2}>
-                            {Object.entries(step.toolArgs)
-                              .map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`)
-                              .join(', ')}
-                          </Text>
-                        )}
-                      </View>
-                    );
-                  }
-                  return null;
-                })}
-              </View>
-            )}
-          </ScrollView>
-
-          <View style={styles.chatInputContainer}>
-            <TextInput
-              style={styles.chatInput}
-              value={chatInput}
-              onChangeText={setChatInput}
-              placeholder="Ask me anything about this codebase..."
-              placeholderTextColor={Colors.mutedDark}
-              multiline
-              maxLength={2000}
-              editable={!loadingChat}
-            />
-            <TouchableOpacity
-              style={[styles.chatSendButton, (!chatInput.trim() || loadingChat) && styles.chatSendButtonDisabled]}
-              onPress={sendCopilotMessage}
-              disabled={!chatInput.trim() || loadingChat}
-            >
-              <Ionicons name="send" size={18} color={Colors.foreground} />
-            </TouchableOpacity>
-          </View>
-        </Animated.View>
-      )}
+        </View>
+      </Modal>
 
       {/* Open Folder Modal */}
       <Modal visible={showOpenFolderModal} transparent animationType="fade">
@@ -1268,52 +1230,56 @@ export default function IDEScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    flexDirection: 'row',
+    flexDirection: 'column',
     backgroundColor: Colors.background,
   },
 
-  // Activity Bar
-  activityBar: {
-    width: ACTIVITY_BAR_WIDTH,
+  // Top Header
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
     backgroundColor: Colors.surface,
-    borderRightWidth: 1,
-    borderRightColor: Colors.border,
-    paddingVertical: Spacing.md,
-    alignItems: 'center',
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.border,
+    gap: Spacing.md,
   },
-  activityIcon: {
-    width: ACTIVITY_BAR_WIDTH,
-    height: ACTIVITY_BAR_WIDTH,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: Spacing.xs,
-    borderLeftWidth: 2,
-    borderLeftColor: 'transparent',
-  },
-  activityIconActive: {
-    borderLeftColor: Colors.primary,
-    backgroundColor: Colors.primaryBg,
+  headerIcon: {
+    padding: Spacing.xs,
   },
 
-  // Explorer Panel
-  explorerPanel: {
-    backgroundColor: Colors.surface,
-    borderRightWidth: 1,
-    borderRightColor: Colors.border,
+
+  // Drawer Modal
+  drawerBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
   },
-  explorerPanelMobile: {
+  drawerContainer: {
     position: 'absolute',
-    left: ACTIVITY_BAR_WIDTH,
-    top: 0,
+    left: 0,
+    right: 0,
     bottom: 0,
-    zIndex: 100,
+    height: '80%',
+    backgroundColor: Colors.surface,
+    borderTopLeftRadius: BorderRadius.lg,
+    borderTopRightRadius: BorderRadius.lg,
     shadowColor: '#000',
-    shadowOffset: { width: 2, height: 0 },
+    shadowOffset: { width: 0, height: -4 },
     shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 5,
+    shadowRadius: 12,
+    elevation: 10,
   },
-  panelHeader: {
+  drawerHandle: {
+    width: 40,
+    height: 4,
+    backgroundColor: Colors.border,
+    borderRadius: 2,
+    alignSelf: 'center',
+    marginTop: Spacing.sm,
+    marginBottom: Spacing.sm,
+  },
+  drawerHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: Spacing.md,
@@ -1321,12 +1287,15 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: Colors.border,
   },
-  panelTitle: {
-    fontSize: FontSize.xs,
+  drawerTitle: {
+    fontSize: FontSize.sm,
     fontWeight: '700',
-    color: Colors.muted,
+    color: Colors.foreground,
     letterSpacing: 0.5,
+    flex: 1,
   },
+
+  // Files
   breadcrumb: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1359,12 +1328,7 @@ const styles = StyleSheet.create({
     color: Colors.foreground,
     flex: 1,
   },
-
-  // Main Editor Area
-  mainArea: {
-    flex: 1,
-    backgroundColor: Colors.background,
-  },
+  // Editor Tab Bar
   tabBar: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1460,7 +1424,6 @@ const styles = StyleSheet.create({
     fontSize: FontSize.md,
     color: Colors.muted,
     marginTop: Spacing.lg,
-    marginBottom: Spacing.xl,
   },
   primaryButton: {
     backgroundColor: Colors.primary,
@@ -1474,23 +1437,9 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
 
-  // Terminal Panel
+  // Terminal
   terminalPanel: {
-    backgroundColor: Colors.surface,
-    borderTopWidth: 1,
-    borderTopColor: Colors.border,
-  },
-  terminalPanelMobile: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    bottom: 0,
-    zIndex: 100,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: -2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 5,
+    flex: 1,
   },
   terminalOutput: {
     flex: 1,
@@ -1538,43 +1487,24 @@ const styles = StyleSheet.create({
     padding: Spacing.sm,
   },
 
-  // Agent Panel
-  agentPanel: {
-    backgroundColor: Colors.surface,
-    borderTopWidth: 1,
-    borderTopColor: Colors.border,
-  },
-  agentPanelMobile: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    bottom: 0,
-    zIndex: 100,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: -2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 5,
-  },
+  // Agent Selector
   agentSelector: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: Spacing.sm,
-    paddingVertical: 4,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
     backgroundColor: Colors.primaryBg,
     borderRadius: BorderRadius.sm,
     borderWidth: 1,
     borderColor: Colors.primary + '40',
-    marginLeft: Spacing.md,
     gap: Spacing.xs,
   },
   agentSelectorText: {
-    fontSize: FontSize.xs,
+    fontSize: FontSize.sm,
     color: Colors.primary,
     fontWeight: '600',
   },
   stopButton: {
-    marginLeft: Spacing.md,
     padding: Spacing.xs,
   },
   agentPickerMenu: {
@@ -1610,16 +1540,18 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
 
-  // Chat
+  // Chat Messages
   chatMessages: {
     flex: 1,
+  },
+  chatMessagesContent: {
     padding: Spacing.md,
   },
   chatMessage: {
     marginBottom: Spacing.md,
     padding: Spacing.md,
     borderRadius: BorderRadius.md,
-    maxWidth: '85%',
+    maxWidth: '95%',
   },
   chatMessageUser: {
     backgroundColor: Colors.primaryBg,
@@ -1760,8 +1692,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'flex-end',
     padding: Spacing.md,
-    borderTopWidth: 1,
-    borderTopColor: Colors.border,
+    backgroundColor: Colors.surface,
     gap: Spacing.sm,
   },
   chatInput: {
@@ -1787,17 +1718,6 @@ const styles = StyleSheet.create({
   chatSendButtonDisabled: {
     backgroundColor: Colors.mutedDark,
     opacity: 0.5,
-  },
-
-  // Overlay
-  overlay: {
-    position: 'absolute',
-    left: ACTIVITY_BAR_WIDTH,
-    top: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: 'rgba(0, 0, 0, 0.6)',
-    zIndex: 99,
   },
 
   // Modal

@@ -37,7 +37,7 @@ except ImportError:
 # Configuration
 DEFAULT_SERVER = "wss://neo-api-oths.onrender.com"
 RECONNECT_DELAY = 5  # seconds
-MAX_RECONNECT_ATTEMPTS = 10
+MAX_RECONNECT_ATTEMPTS = 999  # effectively infinite — agent keeps retrying after sleep/wake
 COMMAND_TIMEOUT = 120  # seconds
 
 
@@ -203,6 +203,85 @@ class RemoteAgent:
                 "exit_code": -1,
             }
 
+    async def execute_command_stream(self, command: str, timeout: int, request_id: str):
+        """Execute a command and stream stdout lines back as partial results."""
+        is_safe, reason = self.is_command_safe(command)
+        if not is_safe:
+            await self.websocket.send(json.dumps({
+                "type": "stream_end",
+                "request_id": request_id,
+                "success": False,
+                "error": f"Command blocked: {reason}",
+                "exit_code": -1,
+            }))
+            return
+
+        self.log(f"Streaming: {command[:50]}...")
+
+        try:
+            if platform.system() == "Windows":
+                process = await asyncio.create_subprocess_shell(
+                    command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    shell=True,
+                )
+            else:
+                process = await asyncio.create_subprocess_shell(
+                    command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    executable="/bin/bash",
+                )
+
+            async def read_stream():
+                while True:
+                    line = await asyncio.wait_for(
+                        process.stdout.readline(),
+                        timeout=timeout,
+                    )
+                    if not line:
+                        break
+                    text = line.decode("utf-8", errors="replace").rstrip("\n")
+                    if text:
+                        await self.websocket.send(json.dumps({
+                            "type": "stream_chunk",
+                            "request_id": request_id,
+                            "data": text,
+                        }))
+
+            await read_stream()
+
+            stderr = await process.stderr.read()
+            await process.wait()
+
+            await self.websocket.send(json.dumps({
+                "type": "stream_end",
+                "request_id": request_id,
+                "success": process.returncode == 0,
+                "stderr": stderr.decode("utf-8", errors="replace"),
+                "exit_code": process.returncode,
+            }))
+
+        except asyncio.TimeoutError:
+            if process:
+                process.kill()
+            await self.websocket.send(json.dumps({
+                "type": "stream_end",
+                "request_id": request_id,
+                "success": False,
+                "error": f"Command timed out after {timeout}s",
+                "exit_code": -1,
+            }))
+        except Exception as e:
+            await self.websocket.send(json.dumps({
+                "type": "stream_end",
+                "request_id": request_id,
+                "success": False,
+                "error": str(e),
+                "exit_code": -1,
+            }))
+
     async def handle_message(self, message: str):
         """Handle a message from the server."""
         try:
@@ -222,6 +301,11 @@ class RemoteAgent:
                 result["type"] = "result"
                 result["request_id"] = request_id
                 await self.websocket.send(json.dumps(result))
+
+            elif msg_type == "execute_stream":
+                command = data.get("command", "")
+                timeout = data.get("timeout", COMMAND_TIMEOUT)
+                await self.execute_command_stream(command, timeout, request_id)
 
             elif msg_type == "status_request":
                 await self.send_status()

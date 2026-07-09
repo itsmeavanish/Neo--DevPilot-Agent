@@ -93,6 +93,9 @@ async def agent_websocket_endpoint(websocket: WebSocket, device_id: str):
                 registry.update_heartbeat(did)
                 logger.debug(f"Heartbeat from {hostname}")
 
+            elif msg_type in ["stream_chunk", "stream_end"]:
+                registry.handle_stream_message(did, message)
+
             elif msg_type in [
                 "result",
                 "command_response",
