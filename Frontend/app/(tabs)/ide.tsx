@@ -56,6 +56,7 @@ interface ChatMessage {
   toolResult?: Record<string, unknown>;
   durationMs?: number;
   step?: number;
+  expanded?: boolean;
 }
 
 interface TerminalLine {
@@ -71,6 +72,129 @@ type PanelType = 'files' | 'terminal' | 'agent';
 const MOBILE_BREAKPOINT = 768;
 const TABLET_BREAKPOINT = 1024;
 const ACTIVITY_BAR_WIDTH = 44;
+
+// Formatted response renderer for Claude Code messages
+function FormattedResponse({ content }: { content: string }) {
+  const blocks = parseResponseBlocks(content);
+  return (
+    <View style={fmtStyles.container}>
+      {blocks.map((block, i) => {
+        switch (block.type) {
+          case 'heading':
+            return (
+              <Text key={i} style={[fmtStyles.heading, block.level === 1 && fmtStyles.h1, block.level === 2 && fmtStyles.h2]}>
+                {block.text}
+              </Text>
+            );
+          case 'code':
+            return (
+              <View key={i} style={fmtStyles.codeBlock}>
+                {block.lang ? <Text style={fmtStyles.codeLang}>{block.lang}</Text> : null}
+                <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                  <Text style={fmtStyles.codeText} selectable>{block.text}</Text>
+                </ScrollView>
+              </View>
+            );
+          case 'list':
+            return (
+              <View key={i} style={fmtStyles.listItem}>
+                <Text style={fmtStyles.bullet}>{block.ordered ? `${block.index}.` : '•'}</Text>
+                <Text style={fmtStyles.listText}>{block.text}</Text>
+              </View>
+            );
+          case 'separator':
+            return <View key={i} style={fmtStyles.separator} />;
+          default:
+            return block.text.trim() ? (
+              <Text key={i} style={fmtStyles.paragraph} selectable>{block.text}</Text>
+            ) : null;
+        }
+      })}
+    </View>
+  );
+}
+
+type Block = { type: 'text' | 'heading' | 'code' | 'list' | 'separator'; text: string; level?: number; lang?: string; ordered?: boolean; index?: number };
+
+function parseResponseBlocks(content: string): Block[] {
+  const lines = content.split('\n');
+  const blocks: Block[] = [];
+  let inCode = false;
+  let codeBuffer = '';
+  let codeLang = '';
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    if (line.startsWith('```')) {
+      if (!inCode) {
+        inCode = true;
+        codeLang = line.slice(3).trim();
+        codeBuffer = '';
+      } else {
+        blocks.push({ type: 'code', text: codeBuffer, lang: codeLang });
+        inCode = false;
+        codeBuffer = '';
+        codeLang = '';
+      }
+      continue;
+    }
+
+    if (inCode) {
+      codeBuffer += (codeBuffer ? '\n' : '') + line;
+      continue;
+    }
+
+    if (line.startsWith('### ')) {
+      blocks.push({ type: 'heading', text: line.slice(4), level: 3 });
+    } else if (line.startsWith('## ')) {
+      blocks.push({ type: 'heading', text: line.slice(3), level: 2 });
+    } else if (line.startsWith('# ')) {
+      blocks.push({ type: 'heading', text: line.slice(2), level: 1 });
+    } else if (/^[-*] /.test(line)) {
+      blocks.push({ type: 'list', text: line.slice(2), ordered: false, index: 0 });
+    } else if (/^\d+\. /.test(line)) {
+      const match = line.match(/^(\d+)\. (.*)$/);
+      blocks.push({ type: 'list', text: match?.[2] || line, ordered: true, index: parseInt(match?.[1] || '1') });
+    } else if (line.match(/^---+$|^===+$/)) {
+      blocks.push({ type: 'separator', text: '' });
+    } else {
+      const last = blocks[blocks.length - 1];
+      if (last && last.type === 'text' && line.trim()) {
+        last.text += '\n' + line;
+      } else if (line.trim()) {
+        blocks.push({ type: 'text', text: line });
+      }
+    }
+  }
+
+  if (inCode && codeBuffer) {
+    blocks.push({ type: 'code', text: codeBuffer, lang: codeLang });
+  }
+
+  return blocks;
+}
+
+const fmtStyles = StyleSheet.create({
+  container: { gap: 8 },
+  heading: { fontWeight: '700', color: Colors.foreground, marginTop: 4 },
+  h1: { fontSize: 16 },
+  h2: { fontSize: 14 },
+  paragraph: { fontSize: 13, color: Colors.foreground, lineHeight: 20 },
+  codeBlock: {
+    backgroundColor: Colors.background,
+    borderRadius: 8,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  codeLang: { fontSize: 10, color: Colors.muted, marginBottom: 4, textTransform: 'uppercase' },
+  codeText: { fontSize: 12, color: Colors.cyan, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
+  listItem: { flexDirection: 'row', gap: 6, paddingLeft: 4 },
+  bullet: { fontSize: 13, color: Colors.primary, width: 16 },
+  listText: { fontSize: 13, color: Colors.foreground, lineHeight: 20, flex: 1 },
+  separator: { height: 1, backgroundColor: Colors.border, marginVertical: 6 },
+});
 
 export default function IDEScreen() {
   const params = useLocalSearchParams<{ openPath?: string }>();
@@ -973,18 +1097,56 @@ export default function IDEScreen() {
             style={styles.chatMessages}
             onContentSizeChange={() => chatScrollRef.current?.scrollToEnd({ animated: true })}
           >
-            {chatMessages.map(msg => (
-              <View key={msg.id} style={[
-                styles.chatMessage,
-                msg.role === 'user' && styles.chatMessageUser,
-                msg.role === 'assistant' && styles.chatMessageAssistant,
-                msg.role === 'system' && styles.chatMessageSystem,
-              ]}>
-                <Text style={[styles.chatMessageText, msg.isError && styles.chatMessageError]}>
-                  {msg.content}
-                </Text>
-              </View>
-            ))}
+            {chatMessages.map(msg => {
+              if (msg.role === 'assistant' && !msg.isError && msg.content.length > 120) {
+                const isExpanded = msg.expanded ?? false;
+                const preview = msg.content.slice(0, 100).replace(/\n/g, ' ') + '...';
+                return (
+                  <TouchableOpacity
+                    key={msg.id}
+                    activeOpacity={0.8}
+                    onPress={() => {
+                      setChatMessages(prev => prev.map(m =>
+                        m.id === msg.id ? { ...m, expanded: !m.expanded } : m
+                      ));
+                    }}
+                    style={[styles.chatMessage, styles.chatMessageAssistant]}
+                  >
+                    {!isExpanded ? (
+                      <View style={styles.collapsedResponse}>
+                        <View style={styles.collapsedHeader}>
+                          <Ionicons name="sparkles" size={14} color={Colors.primary} />
+                          <Text style={styles.collapsedLabel}>Claude Code</Text>
+                          <Ionicons name="chevron-down" size={14} color={Colors.muted} />
+                        </View>
+                        <Text style={styles.collapsedPreview} numberOfLines={2}>{preview}</Text>
+                      </View>
+                    ) : (
+                      <View style={styles.expandedResponse}>
+                        <View style={styles.expandedHeader}>
+                          <Ionicons name="sparkles" size={14} color={Colors.primary} />
+                          <Text style={styles.collapsedLabel}>Claude Code</Text>
+                          <Ionicons name="chevron-up" size={14} color={Colors.muted} />
+                        </View>
+                        <FormattedResponse content={msg.content} />
+                      </View>
+                    )}
+                  </TouchableOpacity>
+                );
+              }
+              return (
+                <View key={msg.id} style={[
+                  styles.chatMessage,
+                  msg.role === 'user' && styles.chatMessageUser,
+                  msg.role === 'assistant' && styles.chatMessageAssistant,
+                  msg.role === 'system' && styles.chatMessageSystem,
+                ]}>
+                  <Text style={[styles.chatMessageText, msg.isError && styles.chatMessageError]}>
+                    {msg.content}
+                  </Text>
+                </View>
+              );
+            })}
 
             {/* Thinking steps */}
             {thinkingSteps.length > 0 && (
@@ -1484,6 +1646,36 @@ const styles = StyleSheet.create({
   },
   chatMessageError: {
     color: Colors.red,
+  },
+  collapsedResponse: {
+    gap: 6,
+  },
+  collapsedHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  collapsedLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: Colors.primary,
+    flex: 1,
+  },
+  collapsedPreview: {
+    fontSize: 12,
+    color: Colors.muted,
+    lineHeight: 18,
+  },
+  expandedResponse: {
+    gap: 8,
+  },
+  expandedHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingBottom: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.borderLight,
   },
 
   // Thinking
