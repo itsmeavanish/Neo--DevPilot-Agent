@@ -21,34 +21,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Create app directory
 WORKDIR /app
 
-# Copy requirements first for better caching
+# Copy source first (needed for pip install -e .)
 COPY pyproject.toml ./
+COPY src/ ./src/
+COPY run.py ./
 
 # Install Python dependencies
 RUN pip install --upgrade pip && \
-    pip install -e . || pip install fastapi uvicorn pydantic pydantic-settings httpx aiohttp psutil redis
-
-# Copy application code
-COPY src/ ./src/
-COPY run.py ./
+    pip install -e .
 
 # Create non-root user for security
 RUN useradd -m -u 1000 jarvis && \
     chown -R jarvis:jarvis /app
 
-# Install Ollama
-RUN curl -L https://ollama.com/download/ollama-linux-amd64.tgz -o /tmp/ollama.tgz && \
-    tar -C /usr -xzf /tmp/ollama.tgz && \
-    rm /tmp/ollama.tgz
-
 USER jarvis
 
-# Expose port (Railway uses $PORT)
+# Expose port (Railway/Render inject $PORT)
 EXPOSE 8000
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:${PORT:-8000}/ || exit 1
 
-# Start command (Railway injects $PORT)
-CMD ["sh", "-c", "ollama serve & sleep 5 && ollama pull llama3.2:1b & uvicorn jarvis.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# Start command
+CMD ["sh", "-c", "uvicorn jarvis.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

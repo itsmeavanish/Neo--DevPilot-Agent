@@ -340,8 +340,8 @@ async def run_jules_agent(request: JulesRequest):
         if not repo and request.workspace_root:
             try:
                 if is_windows:
-                    # Use PowerShell for Windows
-                    repo_cmd = f'powershell -Command "cd \'{request.workspace_root.replace("'", "''")}\'; gh repo view --json nameWithOwner -q .nameWithOwner"'
+                    ws_escaped = request.workspace_root.replace("'", "''")
+                    repo_cmd = f"powershell -Command \"cd '{ws_escaped}'; gh repo view --json nameWithOwner -q .nameWithOwner\""
                 else:
                     repo_cmd = f'cd "{request.workspace_root}" && gh repo view --json nameWithOwner -q .nameWithOwner'
 
